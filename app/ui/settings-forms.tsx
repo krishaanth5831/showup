@@ -4,7 +4,7 @@
 
 import { Copy } from "@phosphor-icons/react";
 import { useState } from "react";
-import { connectBunqAction, saveRulesAction, saveStravaAppAction } from "@/app/actions";
+import { connectBunqAction, connectClaudeAction, saveOwnerAction, saveRulesAction, saveStravaAppAction } from "@/app/actions";
 import type { Rules } from "@/lib/engine";
 import { WEEKDAYS, weekdayLabel } from "@/lib/time";
 import { ActionForm, Field, Submit } from "./forms";
@@ -18,6 +18,39 @@ export function StravaAppForm({ clientId }: { clientId: string }) {
       <div>
         <Submit variant="outline" busy="Saving">
           Save Strava keys
+        </Submit>
+      </div>
+    </ActionForm>
+  );
+}
+
+export function ClaudeForm() {
+  return (
+    <ActionForm action={connectClaudeAction} className="flex flex-col gap-5">
+      <Field label="Claude API key" name="apiKey" type="password" autoComplete="off" required hint="Stored encrypted. It is never shown again." />
+      <div>
+        <Submit busy="Checking the key">Save key</Submit>
+      </div>
+    </ActionForm>
+  );
+}
+
+export function OwnerForm({ name, iban }: { name: string; iban: string }) {
+  return (
+    <ActionForm action={saveOwnerAction} className="flex flex-col gap-5">
+      <Field label="Your name" name="ownerName" defaultValue={name} autoComplete="name" required hint="Shown on your friend's page and in their notifications." />
+      <Field
+        label="Your IBAN (optional)"
+        name="ownerIban"
+        defaultValue={iban}
+        autoComplete="off"
+        autoCapitalize="characters"
+        spellCheck={false}
+        hint="So your friend knows where to give the money back."
+      />
+      <div>
+        <Submit variant="outline" busy="Saving">
+          Save
         </Submit>
       </div>
     </ActionForm>
@@ -43,7 +76,33 @@ export function RulesForm({ rules, locked, lockDays }: { rules: Rules; locked: b
       <fieldset className="flex flex-col gap-5">
         <legend className="mb-4 text-sm font-medium">Who holds the money</legend>
         <Field label="Friend's full name" name="friendName" defaultValue={rules.friendName} autoComplete="off" hint="Exactly as it is on the bank account. Banks check that the name matches the IBAN." />
-        <Field label="Friend's IBAN" name="friendIban" defaultValue={rules.friendIban} autoComplete="off" autoCapitalize="characters" spellCheck={false} />
+        <Field
+          label="Friend's IBAN"
+          name="friendIban"
+          defaultValue={rules.friendIban}
+          autoComplete="off"
+          autoCapitalize="characters"
+          spellCheck={false}
+          hint="Only needed when bunq sends the money."
+        />
+      </fieldset>
+
+      <fieldset>
+        <legend className="mb-4 text-sm font-medium">How the money moves</legend>
+        <div className="grid grid-cols-2 gap-4">
+          <label className="flex flex-col gap-2">
+            <span className="text-sm text-muted">After a miss</span>
+            <select name="collection" defaultValue={rules.collection} className={SELECT}>
+              <option value="friend">My friend collects it</option>
+              <option value="bank">bunq sends it</option>
+            </select>
+          </label>
+          <Field label="Friend keeps (%)" name="keepPercent" inputMode="numeric" defaultValue={rules.friendKeepsPercent} required />
+        </div>
+        <p className="mt-2 text-sm leading-snug text-muted">
+          When your friend collects it, they get a notification for every miss, collect the money from you and mark it on their page. Either way they
+          keep this share of each penalty and give the rest back after the hold time.
+        </p>
       </fieldset>
 
       <fieldset>
@@ -68,7 +127,7 @@ export function RulesForm({ rules, locked, lockDays }: { rules: Rules; locked: b
           <Field label="Shortest run (km)" name="minRunKm" inputMode="decimal" defaultValue={rules.minRunKm} required />
           <Field label="Shortest workout (min)" name="minStrengthMin" inputMode="numeric" defaultValue={rules.minStrengthMin} required />
         </div>
-        <p className="mt-2 text-sm leading-snug text-muted">The workout length only applies to strength sessions found on Strava. A screenshot always counts.</p>
+        <p className="mt-2 text-sm leading-snug text-muted">A run photo has to show at least this distance, and a strength photo at least this length.</p>
       </fieldset>
 
       <fieldset>
@@ -80,6 +139,17 @@ export function RulesForm({ rules, locked, lockDays }: { rules: Rules; locked: b
           <Field label="Most in one week (€)" name="capWeek" inputMode="decimal" defaultValue={rules.capPerWeekCents / 100} required />
           <Field label="Friend holds it for (days)" name="holdDays" inputMode="numeric" defaultValue={rules.holdDays} required />
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend className="mb-4 text-sm font-medium">Sick days</legend>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="Sick days per month" name="sickDays" inputMode="numeric" defaultValue={rules.sickDaysPerMonth} required />
+        </div>
+        <p className="mt-2 text-sm leading-snug text-muted">
+          A sick day costs nothing and leaves the multiplier where it was. It is used on the training day itself, and it comes back if you train
+          anyway. Enter 0 to switch sick days off.
+        </p>
       </fieldset>
 
       <div className="flex flex-col gap-3">

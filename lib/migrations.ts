@@ -113,4 +113,50 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX events_at ON events (at DESC);
   `,
+
+  // 2: sick days. One row per training day marked as sick. A row is removed again when the
+  // claim is taken back, or when the session turns out to be done after all.
+  `
+  CREATE TABLE sick_days (
+    session_date TEXT PRIMARY KEY,
+    claimed_at TIMESTAMPTZ NOT NULL
+  );
+  `,
+
+  // 3: photo proof for every kind of session, read by Claude. Photos from before this
+  // were strength screenshots that counted without a check, so they keep counting.
+  //   check_status: accepted  = Claude read it and it passed the rules
+  //                 waiting   = Claude could not be reached yet; checked again later
+  //                 unchecked = Claude stayed unreachable too long, so it counts without a check
+  // A photo that fails the check is not stored at all.
+  `
+  ALTER TABLE proofs ADD COLUMN kind TEXT NOT NULL DEFAULT 'strength';
+  ALTER TABLE proofs ADD COLUMN check_status TEXT NOT NULL DEFAULT 'accepted';
+  ALTER TABLE proofs ADD COLUMN reading JSONB;
+  ALTER TABLE proofs ADD COLUMN checked_at TIMESTAMPTZ;
+  ALTER TABLE proofs ADD COLUMN check_error TEXT;
+  `,
+
+  // 4: the friend can collect penalties by hand instead of bunq sending them, keeps a share
+  // of each one, and is told by push notification. Everything before this went through the
+  // bank with nothing kept, so old rows say so. Rule versions that were armed could only be
+  // armed with bunq; versions that never were get the new default (friend collects, 10%).
+  `
+  ALTER TABLE penalties ADD COLUMN method TEXT NOT NULL DEFAULT 'bank';
+  ALTER TABLE penalties ADD COLUMN keep_cents INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE penalties ADD COLUMN due_notified_at TIMESTAMPTZ;
+  ALTER TABLE sessions ADD COLUMN collection TEXT NOT NULL DEFAULT 'bank';
+  ALTER TABLE sessions ADD COLUMN friend_notified_at TIMESTAMPTZ;
+  UPDATE rules SET config = config || (CASE WHEN (config->>'armed')::boolean
+    THEN '{"collection": "bank", "friendKeepsPercent": 0}'
+    ELSE '{"collection": "friend", "friendKeepsPercent": 10}' END)::jsonb;
+
+  -- Phones (the friend's) that asked for push notifications.
+  CREATE TABLE push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    keys JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    last_ok_at TIMESTAMPTZ
+  );
+  `,
 ];

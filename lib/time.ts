@@ -146,3 +146,9 @@ export function longDate(ymd: Ymd): string {
   const [y, m, d] = ymd.split("-").map(Number);
   return `${d} ${MONTHS[m - 1]} ${y}`;
 }
+
+/** "November", for a day in that month. */
+export function monthName(ymd: Ymd): string {
+  const names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  return names[Number(ymd.slice(5, 7)) - 1];
+}

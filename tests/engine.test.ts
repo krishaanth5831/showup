@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   type Activity,
   DEFAULT_RULES,
+  type PhotoReading,
   bankAmount,
   centsFromBank,
   chargeFor,
   euros,
   isValidIban,
+  judgePhoto,
   missCost,
   qualifyingActivity,
+  sameFigures,
   validateRules,
   whyNot,
 } from "../lib/engine";
@@ -162,6 +165,10 @@ describe("rule validation", () => {
     expect(validateRules({ ...R, capPerWeekCents: 1000 })).toHaveLength(1);
     expect(validateRules({ ...R, schedule: {} })).toHaveLength(1);
     expect(validateRules({ ...R, friendIban: "NL00NOPE" })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 0 })).toEqual([]);
+    expect(validateRules({ ...R, sickDaysPerMonth: -1 })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 1.5 })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 11 })).toHaveLength(1);
   });
 });
 
@@ -196,5 +203,70 @@ describe("calendar", () => {
     expect(lastSettleableDay(new Date("2026-11-24T01:59:00Z"))).toBe("2026-11-22");
     expect(lastSettleableDay(new Date("2026-11-24T02:00:00Z"))).toBe("2026-11-23");
     expect(lastSettleableDay(new Date("2026-11-24T22:00:00Z"))).toBe("2026-11-23");
+  });
+});
+
+describe("judgePhoto", () => {
+  const run: PhotoReading = {
+    isWorkoutRecord: true,
+    activity: "run",
+    dateShown: "2026-11-23",
+    startTime: "07:12",
+    distanceKm: 5.21,
+    durationS: 1721,
+    calories: 412,
+    sameAsDay: null,
+    summary: "Outdoor run, 5.21 km",
+  };
+
+  it("accepts a run on its day that is far enough", () => {
+    expect(judgePhoto(run, "2026-11-23", "run", DEFAULT_RULES, [])).toEqual({ ok: true });
+  });
+
+  it("counts the distance in whole metres, so 3.4996 km is not 3.5 km", () => {
+    expect(judgePhoto({ ...run, distanceKm: 3.5 }, "2026-11-23", "run", DEFAULT_RULES, []).ok).toBe(true);
+    expect(judgePhoto({ ...run, distanceKm: 3.4996 }, "2026-11-23", "run", DEFAULT_RULES, []).ok).toBe(false);
+  });
+
+  it("refuses a missing distance or date instead of guessing", () => {
+    expect(judgePhoto({ ...run, distanceKm: null }, "2026-11-23", "run", DEFAULT_RULES, [])).toMatchObject({ ok: false });
+    expect(judgePhoto({ ...run, dateShown: null }, "2026-11-23", "run", DEFAULT_RULES, [])).toMatchObject({ ok: false });
+  });
+
+  it("ignores a same-as pointing at the day itself (a replaced photo)", () => {
+    expect(judgePhoto({ ...run, sameAsDay: "2026-11-23" }, "2026-11-23", "run", DEFAULT_RULES, []).ok).toBe(true);
+  });
+
+  it("only calls figures the same when distance and time both match exactly", () => {
+    const other = { ...run, dateShown: "2026-11-16" };
+    expect(sameFigures(run, other, "run")).toBe(true);
+    expect(sameFigures(run, { ...other, durationS: 1722 }, "run")).toBe(false);
+    expect(sameFigures(run, { ...other, distanceKm: 5.22 }, "run")).toBe(false);
+    expect(sameFigures(run, { ...other, durationS: null }, "run")).toBe(false);
+    const lift = { ...run, activity: "strength" as const, distanceKm: null };
+    expect(sameFigures(lift, { ...lift }, "strength")).toBe(true);
+    expect(sameFigures(lift, { ...lift, calories: 413 }, "strength")).toBe(false);
+    expect(judgePhoto(run, "2026-11-23", "run", DEFAULT_RULES, [{ day: "2026-11-16", kind: "run", reading: other }])).toMatchObject({ ok: false });
+    // A strength photo with the same time is no reason to refuse a run.
+    expect(judgePhoto(run, "2026-11-23", "run", DEFAULT_RULES, [{ day: "2026-11-17", kind: "strength", reading: other }]).ok).toBe(true);
+  });
+});
+
+describe("migration 4", () => {
+  it("marks old armed rule versions as bank with nothing kept, and the rest as friend-collects with 10%", async () => {
+    const { openMemoryDb } = await import("../lib/db");
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const db = await openMemoryDb();
+    await db.query("INSERT INTO rules (effective_from, config) VALUES ('2026-01-01', $1::jsonb), ('2026-02-01', $2::jsonb)", [
+      JSON.stringify({ armed: true, baseCents: 1000 }),
+      JSON.stringify({ armed: false, baseCents: 1000 }),
+    ]);
+    const update = MIGRATIONS[3].split(";").find((part) => part.includes("UPDATE rules")) as string;
+    await db.exec(update);
+    const rows = await db.query<{ c: string; k: string }>("SELECT config->>'collection' AS c, config->>'friendKeepsPercent' AS k FROM rules ORDER BY effective_from");
+    expect(rows).toEqual([
+      { c: "bank", k: "0" },
+      { c: "friend", k: "10" },
+    ]);
   });
 });

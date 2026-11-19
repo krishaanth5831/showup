@@ -11,9 +11,11 @@
     "typecheck": "next typegen && tsc --noEmit",
     "check:bunq": "node --import tsx scripts/bunq-sandbox.ts",
     "demo": "node --import tsx scripts/demo.ts && SHOWUP_DATA_DIR=.data-demo next dev -p 3210",
-    "demo:seed": "node --import tsx scripts/demo.ts"
+    "demo:seed": "node --import tsx scripts/demo.ts",
+    "check:claude": "node --import tsx scripts/claude-check.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
     "@electric-sql/pglite": "^0.5.16",
     "@phosphor-icons/react": "^2.1.10",
     "geist": "^1.9.2",
@@ -21,7 +23,9 @@
     "pg": "^8.23.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "undici": "^7.30.2"
+    "undici": "^7.30.2",
+    "web-push": "^4.0.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",
@@ -29,6 +33,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "4.3.3",

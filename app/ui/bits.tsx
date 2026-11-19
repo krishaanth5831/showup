@@ -1,6 +1,6 @@
 // Small presentational pieces used on several screens. Server-rendered, no state.
 
-import { Barbell, Check, Moon, PersonSimpleRun, X } from "@phosphor-icons/react/dist/ssr";
+import { Barbell, Check, FirstAid, Moon, PersonSimpleRun, X } from "@phosphor-icons/react/dist/ssr";
 import type { ReactNode } from "react";
 import type { Kind } from "@/lib/engine";
 import type { DayState } from "@/lib/views";
@@ -18,13 +18,14 @@ export function kindLabel(kind: Kind | null): string {
 const STATE_WORD: Record<DayState, string> = {
   done: "done",
   missed: "missed",
+  sick: "sick day",
   due: "due today",
   checking: "being checked",
   upcoming: "coming up",
   rest: "rest day",
 };
 
-/** The round marker for one day: solid ink = done, red = missed, ring = still open. */
+/** The round marker for one day: solid ink = done, red = missed, grey = sick day, ring = still open. */
 export function DayDot({ state, kind, big = false }: { state: DayState; kind: Kind | null; big?: boolean }) {
   const size = big ? "size-12" : "size-10";
   const icon = big ? 22 : 18;
@@ -40,6 +41,12 @@ export function DayDot({ state, kind, big = false }: { state: DayState; kind: Ki
     return (
       <span role="img" aria-label={label} className={`${base} bg-accent text-on-accent`}>
         <X size={icon} weight="bold" aria-hidden />
+      </span>
+    );
+  if (state === "sick")
+    return (
+      <span role="img" aria-label={label} className={`${base} bg-line text-ink`}>
+        <FirstAid size={icon} weight="bold" aria-hidden />
       </span>
     );
   if (state === "rest")

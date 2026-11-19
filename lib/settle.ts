@@ -1,21 +1,30 @@
-// The nightly job, in four steps:
-//   1. judge   - every scheduled day whose deadline has passed gets a verdict: done or missed
+// The nightly job, in five steps:
+//   1. judge   - every scheduled day whose deadline has passed gets a verdict: done, missed or sick
 //   2. pay     - every unpaid penalty is sent to the friend
 //   3. returns - money the friend sent back is matched against what he holds
-//   4. tidy    - old Strava details are thrown away
+//   4. tell    - the friend's phone hears about new misses, and about money due back
+//   5. tidy    - old Strava details are thrown away
+//
+// Penalties carry the way they are collected (method): "bank" ones are sent by bunq and
+// matched against the bank's payments; "friend" ones are collected by hand and only ever
+// moved along from the friend's page (collect.ts). Steps 2 and 3 never touch "friend" ones.
 //
 // It is written so it can run at any time, as often as you like, and after any outage:
 // it always catches up from where it stopped, and it never charges or pays the same day twice.
 
 import type { Db } from "./db";
-import { type Activity, type Kind, type Rules, chargeFor, isValidIban, normalizeIban, qualifyingActivity } from "./engine";
+import { tellFriend } from "./collect";
+import { type Activity, type Kind, type Rules, chargeFor, isValidIban, keepCents, normalizeIban, qualifyingActivity } from "./engine";
 import { acquireLock, kvGet, kvSet, logEvent, releaseLock } from "./kv";
-import { BankError, type BankPayment, type BankPort, type StravaPort } from "./ports";
+import { BankError, type BankPayment, type BankPort, type NotifyPort, type PhotoCheckPort, type StravaPort } from "./ports";
+import { markUnchecked, proofOn, recheckWaiting } from "./proofs";
 import { ensureRules, rulesFor } from "./rules";
 import { type Ymd, addDays, datesBetween, lastSettleableDay, localDate, settleAfter, weekStart, weekdayOf, zonedToUtc } from "./time";
 
 /** If Strava can't be reached, a day waits this long for it before being judged anyway. */
 export const STRAVA_WAIT_HOURS = 72;
+/** A photo Claude could not check yet holds its day this long; after that it counts unchecked. */
+export const PHOTO_WAIT_HOURS = 72;
 /** Strava's terms allow keeping activity details for at most 7 days. */
 export const ACTIVITY_KEEP_DAYS = 7;
 /** A payment we never got an answer for is looked up in the bank; after this long without a trace it is retried. */
@@ -26,17 +35,22 @@ export const HARD_MAX_CENTS = 50_000;
 export interface Ports {
   strava: StravaPort;
   bank: BankPort;
+  photos: PhotoCheckPort;
+  notify: NotifyPort;
 }
 
 export interface SettleReport {
   /** true when another run was already in progress and this one did nothing. */
   busy: boolean;
-  judged: { date: Ymd; kind: Kind; status: "done" | "missed"; chargeCents: number; practice: boolean }[];
-  /** Days that are waiting for Strava to come back. */
+  judged: { date: Ymd; kind: Kind; status: "done" | "missed" | "sick"; chargeCents: number; practice: boolean }[];
+  /** Days that are waiting for Strava or for a photo check to come back. */
   waiting: Ymd[];
+  waitingFor: "strava" | "photo" | null;
   paid: { date: Ymd; cents: number }[];
   payProblems: string[];
   returnedCents: number;
+  /** Notifications that reached the friend's phone in this run. */
+  told: number;
   notes: string[];
 }
 
@@ -110,18 +124,22 @@ export interface Evidence {
   source: "strava" | "proof" | null;
   activity: Activity | null;
   proofId: number | null;
+  /** A photo was sent in but Claude has not been able to check it yet. */
+  waiting: boolean;
+  /** What Claude read from the photo, in one line. */
+  photoSummary: string | null;
 }
 
 /** What currently proves (or fails to prove) a day's session. */
 export async function evidenceFor(db: Db, day: Ymd, kind: Kind, rules: Rules, acts?: Activity[]): Promise<Evidence> {
   const list = acts ?? (await activitiesOn(db, day));
   const activity = qualifyingActivity(list, day, kind, rules);
-  if (activity) return { done: true, source: "strava", activity, proofId: null };
-  if (kind === "strength") {
-    const proof = await db.query<{ id: number }>("SELECT id FROM proofs WHERE session_date = $1", [day]);
-    if (proof.length) return { done: true, source: "proof", activity: null, proofId: proof[0].id };
+  if (activity) return { done: true, source: "strava", activity, proofId: null, waiting: false, photoSummary: null };
+  const proof = await proofOn(db, day, kind);
+  if (proof && proof.status !== "waiting") {
+    return { done: true, source: "proof", activity: null, proofId: proof.id, waiting: false, photoSummary: proof.summary };
   }
-  return { done: false, source: null, activity: null, proofId: null };
+  return { done: false, source: null, activity: null, proofId: proof?.id ?? null, waiting: !!proof, photoSummary: null };
 }
 
 // ---------- step 1: judge ----------
@@ -143,10 +161,16 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
     const prev = await t.query<SessionRow>("SELECT date, practice, streak FROM sessions WHERE date < $1 ORDER BY date DESC LIMIT 1", [day]);
     // A streak never carries over between practice and real money.
     const prevStreak = prev.length && prev[0].practice === practice ? prev[0].streak : 0;
+    // A sick day (see sick.ts) only matters when the session was not done after all.
+    const claimed = (await t.query("SELECT 1 FROM sick_days WHERE session_date = $1", [day])).length > 0;
+    const status: "done" | "missed" | "sick" = ev.done ? "done" : claimed ? "sick" : "missed";
     let streak = 0;
     let raw = 0;
     let charge = 0;
-    if (!ev.done) {
+    if (status === "sick") {
+      // As if the day had not been planned: no charge, and the multiplier stays where it was.
+      streak = prevStreak;
+    } else if (status === "missed") {
       streak = prevStreak + 1;
       const week = await t.query<{ total: number }>(
         "SELECT COALESCE(SUM(charge_cents), 0)::int AS total FROM sessions WHERE date >= $1 AND date < $2 AND practice = $3",
@@ -157,15 +181,17 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
       charge = c.cents;
     }
     const inserted = await t.query(
-      `INSERT INTO sessions (date, kind, status, practice, source, activity_id, proof_id, streak, raw_cents, charge_cents, note, settled_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (date) DO NOTHING RETURNING date`,
-      [day, kind, ev.done ? "done" : "missed", practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now],
+      `INSERT INTO sessions (date, kind, status, practice, source, activity_id, proof_id, streak, raw_cents, charge_cents, note, settled_at, collection)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (date) DO NOTHING RETURNING date`,
+      [day, kind, status, practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now, rules.collection],
     );
+    // Trained anyway: the sick day goes back into the month's allowance.
+    if (inserted.length && status === "done" && claimed) await t.query("DELETE FROM sick_days WHERE session_date = $1", [day]);
     if (inserted.length && !practice && charge > 0) {
       await t.query(
-        `INSERT INTO penalties (session_date, amount_cents, friend_iban, friend_name, hold_days, ref, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (session_date) DO NOTHING`,
-        [day, charge, normalizeIban(rules.friendIban), rules.friendName, rules.holdDays, penaltyRef(day), now],
+        `INSERT INTO penalties (session_date, amount_cents, friend_iban, friend_name, hold_days, ref, created_at, method, keep_cents)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (session_date) DO NOTHING`,
+        [day, charge, normalizeIban(rules.friendIban), rules.friendName, rules.holdDays, penaltyRef(day), now, rules.collection, keepCents(charge, rules)],
       );
     }
     await t.query(
@@ -173,7 +199,7 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
       [JSON.stringify(day)],
     );
-    return { status: (ev.done ? "done" : "missed") as "done" | "missed", charge, practice, fresh: inserted.length > 0 };
+    return { status, charge, practice, fresh: inserted.length > 0, sickDayBack: status === "done" && claimed };
   });
 }
 
@@ -185,6 +211,9 @@ async function judge(db: Db, ports: Ports, now: Date, report: SettleReport): Pro
 
   const first = addDays(cursor, 1);
   const stravaOn = await ports.strava.connected();
+  const photosOn = await ports.photos.ready();
+  // Photos that could not be checked at upload get another try before their day is judged.
+  await recheckWaiting(db, ports.photos, now);
   let synced = false;
   if (stravaOn) {
     try {
@@ -200,27 +229,43 @@ async function judge(db: Db, ports: Ports, now: Date, report: SettleReport): Pro
   for (const day of datesBetween(first, last)) {
     const version = await rulesFor(db, day);
     const kind = version?.rules.schedule[weekdayOf(day)];
-    // Rest days, and practice days without Strava (nothing to check a run against), are skipped.
-    if (!version || !kind || (!version.rules.armed && !stravaOn)) {
+    // Rest days are skipped, and so are practice days while nothing can check a session
+    // (no photo check and no Strava): there would be no way to prove anything.
+    if (!version || !kind || (!version.rules.armed && !stravaOn && !photosOn)) {
       await kvSet(db, "cursor", day);
       continue;
     }
-    let note: string | null = null;
-    if (!synced) {
-      const giveUpAt = settleAfter(day).getTime() + STRAVA_WAIT_HOURS * 3_600_000;
-      if (now.getTime() < giveUpAt) {
+    const notes: string[] = [];
+    const giveUpAt = (hours: number) => settleAfter(day).getTime() + hours * 3_600_000;
+    if (stravaOn && !synced) {
+      if (now.getTime() < giveUpAt(STRAVA_WAIT_HOURS)) {
         // Don't charge for something we couldn't check. Try again on the next run.
-        report.waiting = datesBetween(day, last).filter((d) => d >= day);
+        report.waiting = datesBetween(day, last);
+        report.waitingFor = "strava";
         return;
       }
-      note = `Judged without Strava: it could not be reached for ${STRAVA_WAIT_HOURS} hours.`;
+      notes.push(`Judged without Strava: it could not be reached for ${STRAVA_WAIT_HOURS} hours.`);
     }
+    const ev = await evidenceFor(db, day, kind, version.rules);
+    if (ev.waiting) {
+      if (now.getTime() < giveUpAt(PHOTO_WAIT_HOURS)) {
+        // A photo was sent in time but Claude couldn't read it yet. An outage never becomes a miss.
+        report.waiting = datesBetween(day, last);
+        report.waitingFor = "photo";
+        return;
+      }
+      await markUnchecked(db, day);
+      notes.push(`Photo counted without a check: Claude could not be reached for ${PHOTO_WAIT_HOURS} hours.`);
+      await logEvent(db, now, "photo", `${day}: photo counted without a check`);
+    }
+    const note = notes.length ? notes.join(" ") : null;
     const res = await judgeDay(db, day, kind, version.rules, now, note);
     if (res.fresh) {
       report.judged.push({ date: day, kind, status: res.status, chargeCents: res.charge, practice: res.practice });
       if (res.status === "missed") {
         await logEvent(db, now, "miss", `${day}: missed ${kind}${res.practice ? " (practice)" : `, ${res.charge} cents`}`);
       }
+      if (res.sickDayBack) await logEvent(db, now, "sick", `${day}: ${kind} was done after all, sick day handed back`);
     }
   }
 }
@@ -250,7 +295,7 @@ async function markHeld(db: Db, p: PenaltyRow, bankId: string, sentAt: Date): Pr
 }
 
 async function payOwed(db: Db, bank: BankPort, now: Date, payments: BankPayment[], report: SettleReport): Promise<void> {
-  const open = await db.query<PenaltyRow>("SELECT * FROM penalties WHERE status IN ('owed', 'sending') ORDER BY session_date");
+  const open = await db.query<PenaltyRow>("SELECT * FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' ORDER BY session_date");
   for (const p of open) {
     // First look in the bank: if a transfer with this penalty's reference exists, it was already paid.
     const existing = payments.find((x) => x.amountCents < 0 && x.description.includes(p.ref));
@@ -311,21 +356,23 @@ export function looksLikeReturn(description: string): boolean {
 }
 
 /**
- * Spreads everything the friend has given back over the penalties held, oldest miss first.
- * Recomputed from scratch each time, so it can't drift.
+ * Spreads everything the friend has given back through the bank over the bank penalties
+ * held, oldest miss first. A penalty is fully back once all but the friend's share is.
+ * Recomputed from scratch each time, so it can't drift. Hand-collected penalties are left alone.
  */
 export async function allocateReturns(db: Db, now: Date): Promise<number> {
   const pool = await db.query<{ total: number }>("SELECT COALESCE(SUM(amount_cents), 0)::int AS total FROM incoming WHERE is_return");
   let left = pool[0].total;
-  const rows = await db.query<{ id: number; amount_cents: number; status: string; returned_cents: number; returned_at: Date | null }>(
-    "SELECT id, amount_cents, status, returned_cents, returned_at FROM penalties WHERE status IN ('held', 'returned') ORDER BY session_date",
+  const rows = await db.query<{ id: number; amount_cents: number; keep_cents: number; status: string; returned_cents: number; returned_at: Date | null }>(
+    "SELECT id, amount_cents, keep_cents, status, returned_cents, returned_at FROM penalties WHERE status IN ('held', 'returned') AND method = 'bank' ORDER BY session_date",
   );
   let total = 0;
   for (const p of rows) {
-    const give = Math.min(p.amount_cents, left);
+    const due = p.amount_cents - p.keep_cents;
+    const give = Math.min(due, left);
     left -= give;
     total += give;
-    const status = give >= p.amount_cents ? "returned" : "held";
+    const status = give >= due ? "returned" : "held";
     if (give !== p.returned_cents || status !== p.status) {
       await db.query("UPDATE penalties SET returned_cents = $2, status = $3, returned_at = $4 WHERE id = $1", [
         p.id,
@@ -340,7 +387,7 @@ export async function allocateReturns(db: Db, now: Date): Promise<number> {
 
 async function trackReturns(db: Db, now: Date, payments: BankPayment[]): Promise<number> {
   const sent = await db.query<{ friend_iban: string; first: Date }>(
-    "SELECT friend_iban, MIN(sent_at) AS first FROM penalties WHERE sent_at IS NOT NULL GROUP BY friend_iban",
+    "SELECT friend_iban, MIN(sent_at) AS first FROM penalties WHERE sent_at IS NOT NULL AND method = 'bank' GROUP BY friend_iban",
   );
   if (sent.length === 0) return 0;
   const since = new Map(sent.map((r) => [normalizeIban(r.friend_iban), new Date(r.first).getTime()]));
@@ -359,10 +406,10 @@ async function trackReturns(db: Db, now: Date, payments: BankPayment[]): Promise
 // ---------- the whole run ----------
 
 async function money(db: Db, bank: BankPort, now: Date, report: SettleReport): Promise<void> {
-  const open = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending', 'held') LIMIT 1");
+  const open = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending', 'held') AND method = 'bank' LIMIT 1");
   if (open.length === 0) return;
   if (!(await bank.connected())) {
-    const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') LIMIT 1");
+    const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' LIMIT 1");
     if (owed.length) report.payProblems.push("The bank is not connected, so penalties can't be sent.");
     return;
   }
@@ -384,13 +431,19 @@ async function money(db: Db, bank: BankPort, now: Date, report: SettleReport): P
 }
 
 export async function runSettlement(db: Db, ports: Ports, now: Date = new Date()): Promise<SettleReport> {
-  const report: SettleReport = { busy: false, judged: [], waiting: [], paid: [], payProblems: [], returnedCents: 0, notes: [] };
+  const report: SettleReport = { busy: false, judged: [], waiting: [], waitingFor: null, paid: [], payProblems: [], returnedCents: 0, told: 0, notes: [] };
   if (!(await acquireLock(db, "settle", 180))) return { ...report, busy: true };
   try {
     const today = localDate(now);
     await ensureRules(db, today);
     await judge(db, ports, now, report);
     await money(db, ports.bank, now, report);
+    try {
+      report.told = await tellFriend(db, ports.notify, now);
+    } catch (e) {
+      // Telling the friend is best effort: it is tried again next run and never undoes a verdict.
+      report.notes.push(`The friend could not be notified: ${(e as Error).message}`);
+    }
     await pruneActivities(db, today);
     await kvSet(db, "last_run", { at: now.toISOString(), judged: report.judged.length, problems: report.payProblems.length });
   } finally {
@@ -404,6 +457,6 @@ export async function settlementDue(db: Db, now: Date): Promise<boolean> {
   const cursor = await kvGet<Ymd>(db, "cursor");
   if (cursor === null) return true;
   if (cursor < lastSettleableDay(now)) return true;
-  const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') LIMIT 1");
+  const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' LIMIT 1");
   return owed.length > 0;
 }

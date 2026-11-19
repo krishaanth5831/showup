@@ -1,7 +1,8 @@
-// The two outside services, described by what the app needs from them. The real
-// implementations live in strava.ts and bunq.ts; the tests plug in fakes.
+// The outside services, described by what the app needs from them. The real
+// implementations live in strava.ts, bunq.ts and claude.ts; the tests plug in fakes.
 
-import type { Activity } from "./engine";
+import type { Activity, Kind, PhotoReading } from "./engine";
+import type { Ymd } from "./time";
 
 export interface StravaPort {
   /** true when an account is linked. */
@@ -63,4 +64,59 @@ export class StravaError extends Error {
   ) {
     super(message);
   }
+}
+
+/** A picture handed to the photo check. */
+export interface PhotoImage {
+  mime: string;
+  bytes: Uint8Array;
+}
+
+export interface PhotoCheckInput {
+  /** The training day the photo is meant to prove, and what was due. */
+  day: Ymd;
+  kind: Kind;
+  /** When it was uploaded, as local wall-clock text: "2026-11-24 19:40". */
+  uploadedAt: string;
+  image: PhotoImage;
+  /** Recent accepted photos of the same kind, newest first, to compare against. */
+  earlier: (PhotoImage & { day: Ymd })[];
+}
+
+export interface PhotoCheckPort {
+  /** true when a Claude API key is saved, so photos can be read. */
+  ready(): Promise<boolean>;
+  /** Reads what the photo shows. The app applies the rules to the reading itself (engine.ts). */
+  read(input: PhotoCheckInput): Promise<PhotoReading>;
+}
+
+/**
+ * setup = the key is missing, wrong, out of credit or not allowed: someone has to fix it,
+ *         and retrying won't help.
+ * unavailable = no answer, overloaded, rate limited: try again later.
+ * refused = Claude would not read this picture.
+ */
+export class PhotoCheckError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: "setup" | "unavailable" | "refused",
+  ) {
+    super(message);
+  }
+}
+
+/** A message for the friend's phone. */
+export interface Notice {
+  title: string;
+  body: string;
+  /** Opened when the notification is tapped. */
+  url: string;
+}
+
+export interface NotifyPort {
+  /**
+   * Sends to every phone the friend turned notifications on for. `subscribers` is how many
+   * there are, `sent` how many took the message (fewer when a push service had a problem).
+   */
+  notifyFriend(notice: Notice): Promise<{ subscribers: number; sent: number }>;
 }

@@ -1,8 +1,10 @@
 import { Warning } from "@phosphor-icons/react/dist/ssr";
 import Link from "next/link";
 import { Suspense } from "react";
+import { sickDayAction, undoSickDayAction } from "@/app/actions";
 import { Chip, DayDot, PageSkeleton, kindLabel } from "@/app/ui/bits";
 import { Countdown } from "@/app/ui/countdown";
+import { ActionButton } from "@/app/ui/forms";
 import { ProofUpload } from "@/app/ui/proof-upload";
 import { requireUser } from "@/lib/auth";
 import { euros, km } from "@/lib/engine";
@@ -64,6 +66,11 @@ async function Today() {
             </li>
           ))}
         </ol>
+        {d.sick.month.limit > 0 && (
+          <p className="mt-4 text-xs text-muted">
+            Sick days in {d.sick.month.name}: {d.sick.month.used} of {d.sick.month.limit} used.
+          </p>
+        )}
       </section>
 
       <dl className="grid grid-cols-3 border-t border-line pt-6">
@@ -74,7 +81,13 @@ async function Today() {
           hot={d.missStreak > 0}
         />
         <Figure label="This week" value={euros(d.weekChargedCents)} note={`of ${euros(d.rules.capPerWeekCents)} at most`} hot={d.weekChargedCents > 0 && d.mode === "armed"} />
-        <Figure label={d.friendName ? `${d.friendName} holds` : "Your friend holds"} value={euros(d.heldCents)} note={d.owedCents > 0 ? `${euros(d.owedCents)} not sent yet` : `for ${d.rules.holdDays} days each`} />
+        <Figure label={d.friendName ? `${d.friendName} holds` : "Your friend holds"} value={euros(d.heldCents)} note={
+            d.owedByHandCents > 0
+              ? `${euros(d.owedByHandCents)} still to pay`
+              : d.owedCents > 0
+                ? `${euros(d.owedCents)} not sent yet`
+                : `for ${d.rules.holdDays} days each`
+          } />
       </dl>
       {d.mode === "practice" && (
         <p className="text-sm leading-relaxed text-muted">
@@ -103,8 +116,14 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
   const target = t.kind === "run" ? `${d.rules.minRunKm} km` : null;
   const stake =
     d.mode === "armed" ? `Miss it and ${euros(t.costIfMissedCents)} goes to ${friend}.` : `In practice mode. A miss would cost ${euros(t.costIfMissedCents)}.`;
-  // Just after midnight a screenshot can still count for yesterday's strength session.
-  const lateUpload = t.uploadFor && t.uploadFor !== t.date ? t.uploadFor : null;
+  // Just after midnight a photo can still count for yesterday's session.
+  const lateUpload = t.uploads.find((u) => u.date !== t.date) ?? null;
+  const canUpload = t.photoCheck && t.uploads.some((u) => u.date === t.date);
+  const what = t.kind === "run" ? "run" : "workout";
+  // Sick days: one for today, and until 03:00 one for yesterday if that day is still open.
+  const sickToday = d.sick.open.find((o) => o.date === t.date) ?? null;
+  const sickEarlier = d.sick.open.find((o) => o.date !== t.date && d.week.find((w) => w.date === o.date)?.state !== "done") ?? null;
+  const month = d.sick.month.name;
 
   return (
     <section className="rounded-[20px] border border-line bg-surface p-6">
@@ -127,15 +146,37 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
               ? t.kind === "run"
                 ? `${km(t.activity.distanceM)} km at ${t.activity.startTime}, recorded on Strava.`
                 : `${Math.round(t.activity.elapsedS / 60)} min at ${t.activity.startTime}, recorded on Strava.`
-              : "Screenshot received."}
+              : (t.photoSummary ?? "Photo received.")}
           </p>
           {t.source === "proof" && t.proofId && (
             <div className="flex flex-col gap-4">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={`/api/proof/${t.proofId}`} alt="Uploaded workout screenshot" className="max-h-72 w-auto self-start rounded-xl border border-line" />
-              {t.uploadFor === t.date && <ProofUpload label="Replace screenshot" replace />}
+              {canUpload && <ProofUpload day={t.date} label="Replace photo" replace />}
             </div>
           )}
+        </div>
+      ) : t.state === "sick" ? (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-4">
+            <DayDot state="sick" kind={t.kind} big />
+            <h1 className="text-4xl font-semibold tracking-tighter">Sick day</h1>
+          </div>
+          <p className="text-muted">
+            No {kindLabel(t.kind).toLowerCase()} today and nothing to pay. The multiplier stays where it was.{" "}
+            If you train anyway and upload the {what} photo, the sick day comes back.
+          </p>
+          <p className="text-sm text-muted">
+            {d.sick.month.left} of {d.sick.month.limit} sick days left in {month}.
+          </p>
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+            {canUpload && <ProofUpload day={t.date} label={`Upload ${what} photo`} replace={false} />}
+            {sickToday?.claimed && (
+              <ActionButton action={undoSickDayAction.bind(null, t.date)} variant="quiet">
+                Take the sick day back
+              </ActionButton>
+            )}
+          </div>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -151,19 +192,74 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
           </p>
           <p className={d.mode === "armed" ? "font-medium text-accent" : "text-muted"}>{stake}</p>
           {t.hint && <p className="text-sm text-muted">{t.hint}</p>}
-          {t.kind === "run" ? (
-            <p className="text-sm text-muted">Record it with Strava. It shows up here by itself a few minutes after it syncs.</p>
+          {t.photoWaiting ? (
+            <p className="text-sm text-muted">Your photo is saved and waiting for Claude to check it. The day won&apos;t be judged before then.</p>
+          ) : !t.photoCheck ? (
+            <p className="text-sm text-muted">
+              Photos are checked by Claude.{" "}
+              <Link href="/settings#photos" className="text-ink underline underline-offset-4">
+                Add an API key
+              </Link>{" "}
+              to upload one.
+            </p>
           ) : (
-            t.uploadFor === t.date && <ProofUpload label="Upload watch screenshot" replace={false} />
+            <p className="text-sm text-muted">
+              {t.kind === "run"
+                ? `Afterwards, upload a screenshot of the run's summary. It has to show the date and at least ${d.rules.minRunKm} km.`
+                : `Afterwards, upload a screenshot of the workout's summary. It has to show the date and at least ${d.rules.minStrengthMin} minutes.`}
+            </p>
+          )}
+          {canUpload && <ProofUpload day={t.date} label={t.photoWaiting ? "Send another photo" : `Upload ${what} photo`} replace={t.photoWaiting} />}
+          {sickToday && !sickToday.claimed && sickToday.limit > 0 && (
+            <div className="border-t border-line pt-4">
+              {sickToday.left > 0 ? (
+                <ActionButton
+                  action={sickDayAction.bind(null, t.date)}
+                  variant="quiet"
+                  confirm={`Use a sick day for today? No charge, and ${sickToday.left - 1} of ${sickToday.limit} will be left in ${month}.`}
+                >
+                  I&apos;m sick today ({sickToday.left} sick {sickToday.left === 1 ? "day" : "days"} left)
+                </ActionButton>
+              ) : (
+                <p className="text-sm text-muted">
+                  All {sickToday.limit} sick days for {month} are used.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {sickEarlier && (sickEarlier.claimed || (sickEarlier.limit > 0 && sickEarlier.left > 0)) && (
+        <div className="mt-6 flex flex-col gap-3 border-t border-line pt-6">
+          {sickEarlier.claimed ? (
+            <>
+              <p className="text-sm">Yesterday ({shortDate(sickEarlier.date)}) is marked as a sick day.</p>
+              <ActionButton action={undoSickDayAction.bind(null, sickEarlier.date)} variant="quiet">
+                Take the sick day back
+              </ActionButton>
+            </>
+          ) : (
+            <>
+              <p className="text-sm">
+                Yesterday&apos;s {kindLabel(sickEarlier.kind).toLowerCase()} ({shortDate(sickEarlier.date)}) is still open until 03:00.
+              </p>
+              <ActionButton
+                action={sickDayAction.bind(null, sickEarlier.date)}
+                variant="quiet"
+                confirm={`Use a sick day for yesterday? No charge, and ${sickEarlier.left - 1} of ${sickEarlier.limit} will be left.`}
+              >
+                I was sick yesterday
+              </ActionButton>
+            </>
           )}
         </div>
       )}
       {lateUpload && (
         <div className="mt-6 flex flex-col gap-3 border-t border-line pt-6">
           <p className="text-sm">
-            Yesterday&apos;s strength session ({shortDate(lateUpload)}) can still be proven until 03:00.
+            Yesterday&apos;s {kindLabel(lateUpload.kind).toLowerCase()} ({shortDate(lateUpload.date)}) can still be proven until 03:00.
           </p>
-          <ProofUpload label="Upload yesterday's screenshot" replace={false} />
+          {t.photoCheck && <ProofUpload day={lateUpload.date} label="Upload yesterday's photo" replace={false} />}
         </div>
       )}
     </section>

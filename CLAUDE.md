@@ -1,7 +1,8 @@
 # Showup
 
-A one-person commitment app: fixed training days, runs checked through Strava, strength
-sessions through a watch screenshot, and a real bank transfer to a friend for every miss.
+A one-person commitment app: fixed training days, every session proven by a workout photo
+that Claude reads (Strava optional for runs), and real money to a friend for every miss: by
+default the friend is notified and collects it by hand (keeping a share), or bunq sends it.
 Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 
 ## Branch rules
@@ -18,7 +19,19 @@ Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 - A judged day never changes. Rules are versioned by start date, so a rule change never rewrites history.
 - A transfer is never sent without first reading the bank's payment list and looking for its
   reference (`SHOWUP-YYYYMMDD`). That is what prevents paying twice.
-- The friend's page shows money and uploaded screenshots only, never Strava data (Strava's API terms).
+- Every penalty carries its `method`. The bank steps (paying, matching returns, the sandbox
+  switch) only ever touch `method = 'bank'`; a `friend` penalty only moves from the friend's
+  page (owed → held → returned), with a notification to the friend on every mark.
+- The friend's page has no login: every friend action checks the link token itself.
+- Notifications to the friend carry kind, day and money only. They are best effort and never
+  block or undo a verdict.
+- A sick day is neutral: no charge, and the count of misses in a row is carried through it
+  unchanged (it neither grows nor resets). It can only be used until 03:00 the next morning,
+  proof of a done session wins over it, and the monthly limit lives in the versioned rules.
+- Claude only reads a photo. Whether it counts is decided in code (`judgePhoto` in `lib/engine.ts`).
+- A photo that fails the check is never stored. One that can't be checked (Claude unreachable) is
+  kept as "waiting", holds its day for up to 72 hours, then counts unchecked. An outage never becomes a miss.
+- The friend's page shows money and uploaded photos only, never Strava data (Strava's API terms).
 - Strava activity details are deleted after 7 days (same terms).
 - No secrets, IBANs or personal data in the repository. Keys live encrypted in the database.
 
@@ -27,4 +40,5 @@ Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 - `npm run demo` seeds made-up history and opens the app on http://localhost:3210 (password printed in the terminal).
 - `npm test`, `npm run lint`, `npm run typecheck`, `npm run build`.
 - `npm run check:bunq` runs the real bank code against bunq's sandbox (play money, needs internet).
+- `ANTHROPIC_API_KEY=... npm run check:claude -- <photo> <run|strength> [day] [earlier.jpg@day ...]` runs one real photo check (costs a few cents).
 - Scripts run as `node --import tsx <file>`.

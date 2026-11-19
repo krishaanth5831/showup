@@ -1,10 +1,10 @@
 "use client";
 
 // Picks a workout screenshot, shrinks it in the browser (so uploads stay small and fast
-// on mobile data) and sends it to the server.
+// on mobile data) and sends it to the server, where Claude checks it.
 
 import { Camera } from "@phosphor-icons/react";
-import { useActionState, useRef, useState, useTransition } from "react";
+import { useActionState, useMemo, useRef, useState, useTransition } from "react";
 import { type FormState, uploadProofAction } from "@/app/actions";
 import { Message } from "./forms";
 import { buttonClass } from "./styles";
@@ -27,8 +27,9 @@ async function shrink(file: File): Promise<Blob> {
   return file;
 }
 
-export function ProofUpload({ label, replace }: { label: string; replace: boolean }) {
-  const [state, run] = useActionState<FormState, FormData>(uploadProofAction, {});
+export function ProofUpload({ day, label, replace }: { day: string; label: string; replace: boolean }) {
+  const action = useMemo(() => uploadProofAction.bind(null, day), [day]);
+  const [state, run] = useActionState<FormState, FormData>(action, {});
   const [working, startTransition] = useTransition();
   const [localError, setLocalError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -54,7 +55,7 @@ export function ProofUpload({ label, replace }: { label: string; replace: boolea
       <div>
         <button type="button" disabled={working} onClick={() => input.current?.click()} className={buttonClass(replace ? "outline" : "solid")}>
           <Camera size={18} weight="bold" aria-hidden />
-          {working ? "Uploading" : label}
+          {working ? "Checking the photo" : label}
         </button>
       </div>
       <Message state={localError ? { error: localError } : state} />

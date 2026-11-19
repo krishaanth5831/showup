@@ -6,6 +6,7 @@ import {
   checkNowAction,
   disarmAction,
   disconnectBunqAction,
+  disconnectClaudeAction,
   disconnectStravaAction,
   logoutAction,
   newFriendLinkAction,
@@ -14,7 +15,7 @@ import {
 import { Chip, PageSkeleton, Section } from "@/app/ui/bits";
 import { ActionButton } from "@/app/ui/forms";
 import { buttonClass } from "@/app/ui/styles";
-import { BunqForm, CopyLink, RulesForm, StravaAppForm } from "@/app/ui/settings-forms";
+import { BunqForm, ClaudeForm, CopyLink, OwnerForm, RulesForm, StravaAppForm } from "@/app/ui/settings-forms";
 import { requireUser } from "@/lib/auth";
 import { euros, prettyIban } from "@/lib/engine";
 import { originOf } from "@/lib/origin";
@@ -67,7 +68,7 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         {s.rules.locked ? (
           <div className="flex flex-col gap-4">
             <p className="max-w-[60ch] leading-relaxed text-muted">
-              Every missed session sends money to {friend}. The first miss costs {euros(r.baseCents)}, and each further miss in a row multiplies it by{" "}
+              Every missed session costs money: {r.collection === "bank" ? `bunq sends it to ${friend}` : `${friend} is notified and collects it from you`}. The first miss costs {euros(r.baseCents)}, and each further miss in a row multiplies it by{" "}
               {r.multiplier}, up to {euros(r.capPerMissCents)} per miss and {euros(r.capPerWeekCents)} per week.
             </p>
             {s.rules.pending ? (
@@ -102,14 +103,17 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         ) : (
           <div className="flex flex-col gap-4">
             <p className="max-w-[60ch] leading-relaxed text-muted">
-              You are in practice mode: sessions are tracked, nothing is charged. Once real money is on, missed sessions are paid to {friend}{" "}
-              automatically, and changing the rules or switching it off takes {LOCK_DAYS} days.
+              You are in practice mode: sessions are tracked, nothing is charged. Once real money is on,{" "}
+              {r.collection === "bank"
+                ? `bunq pays every missed session to ${friend} by itself`
+                : `${friend} is notified of every missed session and collects the penalty from you`}
+              , and changing the rules or switching it off takes {LOCK_DAYS} days.
             </p>
             {s.canArm.ok ? (
               <ActionButton
                 action={armAction}
                 variant="danger"
-                confirm={`From tomorrow, each missed session sends ${euros(r.baseCents)} or more to ${friend}. You can't undo a penalty, and switching off takes ${LOCK_DAYS} days. Start?`}
+                confirm={`From tomorrow, each missed session costs ${euros(r.baseCents)} or more, ${r.collection === "bank" ? `sent to ${friend} by bunq` : `collected by ${friend}`}. You can't undo a penalty, and switching off takes ${LOCK_DAYS} days. Start?`}
               >
                 Switch on real money
               </ActionButton>
@@ -120,7 +124,52 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         )}
       </section>
 
-      <Section id="strava" title="Strava">
+      <Section id="photos" title="Photo check">
+        {s.claude.connected ? (
+          <div className="flex flex-col gap-4">
+            <p className="leading-relaxed">
+              Claude checks every workout photo.{" "}
+              <span className="text-muted">
+                Key ending in <span className="num text-ink">{s.claude.hint}</span>
+                {s.claude.connectedAt ? `, saved on ${when(s.claude.connectedAt)}.` : "."}
+              </span>
+            </p>
+            <p className="max-w-[60ch] text-sm leading-relaxed text-muted">
+              A photo counts when it shows the right kind of workout, on the right day, with the distance or length the rules ask for, and when it
+              is not the same workout as an earlier photo. One that fails is not saved, and the reason is shown so you can send a better one in time.
+            </p>
+            <div className="flex flex-wrap gap-3">
+              {!s.rules.locked && !arming && (
+                <ActionButton action={disconnectClaudeAction} variant="quiet" confirm="Remove the Claude key? Photos can't be checked without it.">
+                  Remove key
+                </ActionButton>
+              )}
+            </div>
+            <details className="text-sm text-muted">
+              <summary className="cursor-pointer text-ink underline underline-offset-4">Use a different key</summary>
+              <div className="mt-5">
+                <ClaudeForm />
+              </div>
+            </details>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-6">
+            <ol className="flex max-w-[60ch] list-decimal flex-col gap-2 pl-5 text-sm leading-relaxed text-muted">
+              <li>
+                Open{" "}
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-ink underline underline-offset-4">
+                  console.anthropic.com
+                </a>
+                , add some credit under Billing and create an API key.
+              </li>
+              <li>Paste it below. Each photo check costs a few cents.</li>
+            </ol>
+            <ClaudeForm />
+          </div>
+        )}
+      </Section>
+
+      <Section id="strava" title="Strava (optional)">
         {note && (
           <p role="status" className="mb-5 text-sm font-medium">
             {note}
@@ -142,16 +191,17 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
               <a href="/api/strava/connect" className={buttonClass("outline")}>
                 Connect again
               </a>
-              {!s.rules.locked && !arming && (
-                <ActionButton action={disconnectStravaAction} variant="quiet" confirm="Disconnect Strava? Runs can't be checked without it.">
-                  Disconnect
-                </ActionButton>
-              )}
+              <ActionButton action={disconnectStravaAction} variant="quiet" confirm="Disconnect Strava? Photos keep working.">
+                Disconnect
+              </ActionButton>
             </div>
           </div>
         ) : (
-          <div className="flex flex-col gap-6">
-            <ol className="flex max-w-[60ch] list-decimal flex-col gap-2 pl-5 text-sm leading-relaxed text-muted">
+          <details className="flex flex-col gap-6 text-sm text-muted">
+            <summary className="cursor-pointer text-ink underline underline-offset-4">
+              Not needed: photos prove every session. Connecting Strava lets runs count without a photo.
+            </summary>
+            <ol className="mt-5 mb-6 flex max-w-[60ch] list-decimal flex-col gap-2 pl-5 text-sm leading-relaxed text-muted">
               <li>
                 Open{" "}
                 <a href="https://www.strava.com/settings/api" target="_blank" rel="noreferrer" className="text-ink underline underline-offset-4">
@@ -167,17 +217,23 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
             </ol>
             <StravaAppForm clientId={s.strava.clientId} />
             {s.strava.hasApp && (
-              <div>
+              <div className="mt-6">
                 <a href="/api/strava/connect" className={buttonClass("solid")}>
                   Connect Strava
                 </a>
               </div>
             )}
-          </div>
+          </details>
         )}
       </Section>
 
-      <Section id="bank" title="Bank">
+      <Section id="bank" title={r.collection === "bank" ? "Bank" : "Bank (not needed)"}>
+        {r.collection !== "bank" && (
+          <p className="mb-5 max-w-[60ch] text-sm leading-relaxed text-muted">
+            Your friend collects the money by hand, so no bank is needed. Connect bunq only if you want it to send penalties by itself (Rules, How the
+            money moves). That needs bunq Pro or Elite.
+          </p>
+        )}
         {s.bank.connected ? (
           <div className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -214,9 +270,9 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         ) : (
           <div className="flex flex-col gap-6">
             <ol className="flex max-w-[60ch] list-decimal flex-col gap-2 pl-5 text-sm leading-relaxed text-muted">
-              <li>In the bunq app go to Profile, Security &amp; Settings, Developers, API keys and add a key. This needs bunq Pro or Elite.</li>
-              <li>Open the new key&apos;s menu and switch on &quot;Allow all IP addresses&quot;.</li>
-              <li>Paste the key below within the hour. Unused keys expire.</li>
+              <li>In the bunq app go to Profile, Security &amp; Settings, Developers, API keys and add a key. API keys need bunq Pro or Elite.</li>
+              <li>Before pasting it anywhere, open the new key&apos;s menu and switch on &quot;Allow all IP addresses&quot;.</li>
+              <li>Paste the key below straight away.</li>
             </ol>
             <BunqForm />
           </div>
@@ -229,14 +285,22 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
 
       <Section title={`${friend === "your friend" ? "Your friend" : friend}'s page`}>
         <p className="mb-5 max-w-[60ch] text-sm leading-relaxed text-muted">
-          A read-only page for {friend}: the money being held, when each transfer is due back and where to send it. Anyone with this link can
-          open it, so share it with nobody else.
+          {friend}&apos;s own version of Showup: what to collect from you, what they hold, when to give it back and what they keep. They can add it
+          to their Home Screen and turn on notifications there. Anyone with this link can open it, so share it with nobody else.
         </p>
         <div className="flex flex-col gap-4">
           <CopyLink url={origin + s.friendLink} />
+          <p className="text-sm text-muted">
+            {s.phones > 0
+              ? `Notifications are on for ${s.phones} of ${friend}'s phone${s.phones === 1 ? "" : "s"}.`
+              : `${friend === "your friend" ? "Your friend has" : `${friend} has`} not turned on notifications yet.`}
+          </p>
           <ActionButton action={newFriendLinkAction} variant="quiet" confirm="Make a new link? The current one stops working.">
             Make a new link
           </ActionButton>
+        </div>
+        <div className="mt-8">
+          <OwnerForm name={s.owner.name} iban={s.owner.iban} />
         </div>
       </Section>
 
