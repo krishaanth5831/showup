@@ -104,3 +104,19 @@ export class PhotoCheckError extends Error {
     super(message);
   }
 }
+
+/** A message for the friend's phone. */
+export interface Notice {
+  title: string;
+  body: string;
+  /** Opened when the notification is tapped. */
+  url: string;
+}
+
+export interface NotifyPort {
+  /**
+   * Sends to every phone the friend turned notifications on for. `subscribers` is how many
+   * there are, `sent` how many took the message (fewer when a push service had a problem).
+   */
+  notifyFriend(notice: Notice): Promise<{ subscribers: number; sent: number }>;
+}

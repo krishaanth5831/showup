@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { createPassword, login, logout, requireUser } from "@/lib/auth";
 import { BunqClient, bunqClient, bunqConnect, loadBunq, saveBunq } from "@/lib/bunq";
 import { ClaudePhotoCheck, connectClaude, loadClaude } from "@/lib/claude";
+import { saveOwnerDetails } from "@/lib/collect";
 import { getDb } from "@/lib/db";
 import { type Kind, type Rules, isValidIban, normalizeIban } from "@/lib/engine";
 import { kvDelete, kvSet, logEvent } from "@/lib/kv";
@@ -264,6 +265,8 @@ export async function saveRulesAction(_prev: FormState, form: FormData): Promise
       holdDays: Math.round(num(form, "holdDays")),
       // A page that was open before this field existed sends nothing: keep the current value then.
       sickDaysPerMonth: form.has("sickDays") ? Math.round(num(form, "sickDays")) : current.sickDaysPerMonth,
+      collection: form.get("collection") === "bank" ? "bank" : form.get("collection") === "friend" ? "friend" : current.collection,
+      friendKeepsPercent: form.has("keepPercent") ? Math.round(num(form, "keepPercent")) : current.friendKeepsPercent,
       friendName: String(form.get("friendName") ?? ""),
       friendIban,
     });
@@ -279,8 +282,9 @@ export async function armAction(_prev: FormState): Promise<FormState> {
   try {
     const claude = await loadClaude(db);
     const bunq = await loadBunq(db);
+    const rules = (await ruleState(db, localDate(new Date()))).current.rules;
     if (!claude?.apiKey) return { error: "Add a Claude API key first, so photos can be checked." };
-    if (!bunq?.accountId) return { error: "Connect bunq first." };
+    if (rules.collection === "bank" && !bunq?.accountId) return { error: "Connect bunq first, or let your friend collect the money by hand." };
     const from = await arm(db, localDate(new Date()));
     await logEvent(db, new Date(), "rules", `armed from ${from}`);
     refresh();
@@ -319,6 +323,18 @@ export async function markIncomingAction(_prev: FormState, form: FormData): Prom
   await allocateReturns(db, new Date());
   refresh();
   return { ok: "Updated." };
+}
+
+/** Your name and IBAN, shown on the friend's page: who to collect from, where to give it back. */
+export async function saveOwnerAction(_prev: FormState, form: FormData): Promise<FormState> {
+  const db = await requireUser();
+  const name = String(form.get("ownerName") ?? "").trim();
+  const iban = normalizeIban(String(form.get("ownerIban") ?? ""));
+  if (!name) return { error: "Enter your name, so your friend knows who to collect from." };
+  if (iban && !isValidIban(iban)) return { error: "That IBAN is not valid. Check it for typos." };
+  await saveOwnerDetails(db, { name, iban });
+  refresh();
+  return { ok: "Saved." };
 }
 
 export async function newFriendLinkAction(_prev: FormState): Promise<FormState> {

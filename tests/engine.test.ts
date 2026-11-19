@@ -251,3 +251,22 @@ describe("judgePhoto", () => {
     expect(judgePhoto(run, "2026-11-23", "run", DEFAULT_RULES, [{ day: "2026-11-17", kind: "strength", reading: other }]).ok).toBe(true);
   });
 });
+
+describe("migration 4", () => {
+  it("marks old armed rule versions as bank with nothing kept, and the rest as friend-collects with 10%", async () => {
+    const { openMemoryDb } = await import("../lib/db");
+    const { MIGRATIONS } = await import("../lib/migrations");
+    const db = await openMemoryDb();
+    await db.query("INSERT INTO rules (effective_from, config) VALUES ('2026-01-01', $1::jsonb), ('2026-02-01', $2::jsonb)", [
+      JSON.stringify({ armed: true, baseCents: 1000 }),
+      JSON.stringify({ armed: false, baseCents: 1000 }),
+    ]);
+    const update = MIGRATIONS[3].split(";").find((part) => part.includes("UPDATE rules")) as string;
+    await db.exec(update);
+    const rows = await db.query<{ c: string; k: string }>("SELECT config->>'collection' AS c, config->>'friendKeepsPercent' AS k FROM rules ORDER BY effective_from");
+    expect(rows).toEqual([
+      { c: "bank", k: "0" },
+      { c: "friend", k: "10" },
+    ]);
+  });
+});

@@ -5,6 +5,9 @@
 //
 //   test key -> real key   the rehearsal ends: test penalties are dropped, the days so far
 //                          count as practice, and real money is off until it is switched on again.
+//                          All of that only for days whose money went through the bank: when the
+//                          friend collects by hand the money is real whatever bank key is connected,
+//                          so those penalties, days and rules are not touched.
 //   real key -> test key   refused while real money is on (it would be a way out of paying),
 //                          and refused for good once real transfers are on record.
 //
@@ -33,7 +36,7 @@ export async function planBankSwitch(db: Db, today: Ymd, next: BankEnv): Promise
   if (state.locked || state.pending?.rules.armed) {
     return { kind: "refuse", why: "Real money is on, so a test key can't take the place of the real bank." };
   }
-  const rows = await db.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM penalties");
+  const rows = await db.query<{ n: number }>("SELECT COUNT(*)::int AS n FROM penalties WHERE method = 'bank'");
   if (rows[0].n > 0) {
     return {
       kind: "refuse",
@@ -51,13 +54,13 @@ export async function applyBankSwitch(db: Db, now: Date, next: BankEnv, plan: Sw
   if (plan.kind === "refuse") throw new Error(plan.why);
   await db.tx(async (t) => {
     if (plan.kind === "end-test") {
-      await t.query("DELETE FROM penalties");
+      await t.query("DELETE FROM penalties WHERE method = 'bank'");
       await t.query("DELETE FROM incoming");
-      await t.query("UPDATE sessions SET practice = true WHERE practice = false");
-      // Real money off, as if it had never been on: days that are not judged yet must not
-      // turn into real penalties either. Waiting changes are dropped.
-      await t.query("DELETE FROM rules WHERE effective_from > $1", [localDate(now)]);
-      await t.query(`UPDATE rules SET config = jsonb_set(config, '{armed}', 'false'::jsonb)`);
+      await t.query("UPDATE sessions SET practice = true WHERE practice = false AND collection = 'bank'");
+      // Real money through the bank off, as if it had never been on: days that are not judged
+      // yet must not turn into real bank penalties either. Waiting bank changes are dropped.
+      await t.query("DELETE FROM rules WHERE effective_from > $1 AND config->>'collection' = 'bank'", [localDate(now)]);
+      await t.query(`UPDATE rules SET config = jsonb_set(config, '{armed}', 'false'::jsonb) WHERE config->>'collection' = 'bank'`);
       await logEvent(t, now, "bank", "test with play money ended: test penalties dropped, real money switched off");
     }
     await kvSet(t, "ledger_env", next);

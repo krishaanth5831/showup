@@ -1,7 +1,8 @@
 # Showup
 
 A one-person commitment app: fixed training days, every session proven by a workout photo
-that Claude reads (Strava optional for runs), and a real bank transfer to a friend for every miss.
+that Claude reads (Strava optional for runs), and real money to a friend for every miss: by
+default the friend is notified and collects it by hand (keeping a share), or bunq sends it.
 Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 
 ## Branch rules
@@ -18,6 +19,12 @@ Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 - A judged day never changes. Rules are versioned by start date, so a rule change never rewrites history.
 - A transfer is never sent without first reading the bank's payment list and looking for its
   reference (`SHOWUP-YYYYMMDD`). That is what prevents paying twice.
+- Every penalty carries its `method`. The bank steps (paying, matching returns, the sandbox
+  switch) only ever touch `method = 'bank'`; a `friend` penalty only moves from the friend's
+  page (owed → held → returned), with a notification to the friend on every mark.
+- The friend's page has no login: every friend action checks the link token itself.
+- Notifications to the friend carry kind, day and money only. They are best effort and never
+  block or undo a verdict.
 - A sick day is neutral: no charge, and the count of misses in a row is carried through it
   unchanged (it neither grows nor resets). It can only be used until 03:00 the next morning,
   proof of a done session wins over it, and the monthly limit lives in the versioned rules.

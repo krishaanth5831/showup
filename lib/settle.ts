@@ -1,16 +1,22 @@
-// The nightly job, in four steps:
+// The nightly job, in five steps:
 //   1. judge   - every scheduled day whose deadline has passed gets a verdict: done, missed or sick
 //   2. pay     - every unpaid penalty is sent to the friend
 //   3. returns - money the friend sent back is matched against what he holds
-//   4. tidy    - old Strava details are thrown away
+//   4. tell    - the friend's phone hears about new misses, and about money due back
+//   5. tidy    - old Strava details are thrown away
+//
+// Penalties carry the way they are collected (method): "bank" ones are sent by bunq and
+// matched against the bank's payments; "friend" ones are collected by hand and only ever
+// moved along from the friend's page (collect.ts). Steps 2 and 3 never touch "friend" ones.
 //
 // It is written so it can run at any time, as often as you like, and after any outage:
 // it always catches up from where it stopped, and it never charges or pays the same day twice.
 
 import type { Db } from "./db";
-import { type Activity, type Kind, type Rules, chargeFor, isValidIban, normalizeIban, qualifyingActivity } from "./engine";
+import { tellFriend } from "./collect";
+import { type Activity, type Kind, type Rules, chargeFor, isValidIban, keepCents, normalizeIban, qualifyingActivity } from "./engine";
 import { acquireLock, kvGet, kvSet, logEvent, releaseLock } from "./kv";
-import { BankError, type BankPayment, type BankPort, type PhotoCheckPort, type StravaPort } from "./ports";
+import { BankError, type BankPayment, type BankPort, type NotifyPort, type PhotoCheckPort, type StravaPort } from "./ports";
 import { markUnchecked, proofOn, recheckWaiting } from "./proofs";
 import { ensureRules, rulesFor } from "./rules";
 import { type Ymd, addDays, datesBetween, lastSettleableDay, localDate, settleAfter, weekStart, weekdayOf, zonedToUtc } from "./time";
@@ -30,6 +36,7 @@ export interface Ports {
   strava: StravaPort;
   bank: BankPort;
   photos: PhotoCheckPort;
+  notify: NotifyPort;
 }
 
 export interface SettleReport {
@@ -42,6 +49,8 @@ export interface SettleReport {
   paid: { date: Ymd; cents: number }[];
   payProblems: string[];
   returnedCents: number;
+  /** Notifications that reached the friend's phone in this run. */
+  told: number;
   notes: string[];
 }
 
@@ -172,17 +181,17 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
       charge = c.cents;
     }
     const inserted = await t.query(
-      `INSERT INTO sessions (date, kind, status, practice, source, activity_id, proof_id, streak, raw_cents, charge_cents, note, settled_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (date) DO NOTHING RETURNING date`,
-      [day, kind, status, practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now],
+      `INSERT INTO sessions (date, kind, status, practice, source, activity_id, proof_id, streak, raw_cents, charge_cents, note, settled_at, collection)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (date) DO NOTHING RETURNING date`,
+      [day, kind, status, practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now, rules.collection],
     );
     // Trained anyway: the sick day goes back into the month's allowance.
     if (inserted.length && status === "done" && claimed) await t.query("DELETE FROM sick_days WHERE session_date = $1", [day]);
     if (inserted.length && !practice && charge > 0) {
       await t.query(
-        `INSERT INTO penalties (session_date, amount_cents, friend_iban, friend_name, hold_days, ref, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (session_date) DO NOTHING`,
-        [day, charge, normalizeIban(rules.friendIban), rules.friendName, rules.holdDays, penaltyRef(day), now],
+        `INSERT INTO penalties (session_date, amount_cents, friend_iban, friend_name, hold_days, ref, created_at, method, keep_cents)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (session_date) DO NOTHING`,
+        [day, charge, normalizeIban(rules.friendIban), rules.friendName, rules.holdDays, penaltyRef(day), now, rules.collection, keepCents(charge, rules)],
       );
     }
     await t.query(
@@ -286,7 +295,7 @@ async function markHeld(db: Db, p: PenaltyRow, bankId: string, sentAt: Date): Pr
 }
 
 async function payOwed(db: Db, bank: BankPort, now: Date, payments: BankPayment[], report: SettleReport): Promise<void> {
-  const open = await db.query<PenaltyRow>("SELECT * FROM penalties WHERE status IN ('owed', 'sending') ORDER BY session_date");
+  const open = await db.query<PenaltyRow>("SELECT * FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' ORDER BY session_date");
   for (const p of open) {
     // First look in the bank: if a transfer with this penalty's reference exists, it was already paid.
     const existing = payments.find((x) => x.amountCents < 0 && x.description.includes(p.ref));
@@ -347,21 +356,23 @@ export function looksLikeReturn(description: string): boolean {
 }
 
 /**
- * Spreads everything the friend has given back over the penalties held, oldest miss first.
- * Recomputed from scratch each time, so it can't drift.
+ * Spreads everything the friend has given back through the bank over the bank penalties
+ * held, oldest miss first. A penalty is fully back once all but the friend's share is.
+ * Recomputed from scratch each time, so it can't drift. Hand-collected penalties are left alone.
  */
 export async function allocateReturns(db: Db, now: Date): Promise<number> {
   const pool = await db.query<{ total: number }>("SELECT COALESCE(SUM(amount_cents), 0)::int AS total FROM incoming WHERE is_return");
   let left = pool[0].total;
-  const rows = await db.query<{ id: number; amount_cents: number; status: string; returned_cents: number; returned_at: Date | null }>(
-    "SELECT id, amount_cents, status, returned_cents, returned_at FROM penalties WHERE status IN ('held', 'returned') ORDER BY session_date",
+  const rows = await db.query<{ id: number; amount_cents: number; keep_cents: number; status: string; returned_cents: number; returned_at: Date | null }>(
+    "SELECT id, amount_cents, keep_cents, status, returned_cents, returned_at FROM penalties WHERE status IN ('held', 'returned') AND method = 'bank' ORDER BY session_date",
   );
   let total = 0;
   for (const p of rows) {
-    const give = Math.min(p.amount_cents, left);
+    const due = p.amount_cents - p.keep_cents;
+    const give = Math.min(due, left);
     left -= give;
     total += give;
-    const status = give >= p.amount_cents ? "returned" : "held";
+    const status = give >= due ? "returned" : "held";
     if (give !== p.returned_cents || status !== p.status) {
       await db.query("UPDATE penalties SET returned_cents = $2, status = $3, returned_at = $4 WHERE id = $1", [
         p.id,
@@ -376,7 +387,7 @@ export async function allocateReturns(db: Db, now: Date): Promise<number> {
 
 async function trackReturns(db: Db, now: Date, payments: BankPayment[]): Promise<number> {
   const sent = await db.query<{ friend_iban: string; first: Date }>(
-    "SELECT friend_iban, MIN(sent_at) AS first FROM penalties WHERE sent_at IS NOT NULL GROUP BY friend_iban",
+    "SELECT friend_iban, MIN(sent_at) AS first FROM penalties WHERE sent_at IS NOT NULL AND method = 'bank' GROUP BY friend_iban",
   );
   if (sent.length === 0) return 0;
   const since = new Map(sent.map((r) => [normalizeIban(r.friend_iban), new Date(r.first).getTime()]));
@@ -395,10 +406,10 @@ async function trackReturns(db: Db, now: Date, payments: BankPayment[]): Promise
 // ---------- the whole run ----------
 
 async function money(db: Db, bank: BankPort, now: Date, report: SettleReport): Promise<void> {
-  const open = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending', 'held') LIMIT 1");
+  const open = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending', 'held') AND method = 'bank' LIMIT 1");
   if (open.length === 0) return;
   if (!(await bank.connected())) {
-    const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') LIMIT 1");
+    const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' LIMIT 1");
     if (owed.length) report.payProblems.push("The bank is not connected, so penalties can't be sent.");
     return;
   }
@@ -420,13 +431,19 @@ async function money(db: Db, bank: BankPort, now: Date, report: SettleReport): P
 }
 
 export async function runSettlement(db: Db, ports: Ports, now: Date = new Date()): Promise<SettleReport> {
-  const report: SettleReport = { busy: false, judged: [], waiting: [], waitingFor: null, paid: [], payProblems: [], returnedCents: 0, notes: [] };
+  const report: SettleReport = { busy: false, judged: [], waiting: [], waitingFor: null, paid: [], payProblems: [], returnedCents: 0, told: 0, notes: [] };
   if (!(await acquireLock(db, "settle", 180))) return { ...report, busy: true };
   try {
     const today = localDate(now);
     await ensureRules(db, today);
     await judge(db, ports, now, report);
     await money(db, ports.bank, now, report);
+    try {
+      report.told = await tellFriend(db, ports.notify, now);
+    } catch (e) {
+      // Telling the friend is best effort: it is tried again next run and never undoes a verdict.
+      report.notes.push(`The friend could not be notified: ${(e as Error).message}`);
+    }
     await pruneActivities(db, today);
     await kvSet(db, "last_run", { at: now.toISOString(), judged: report.judged.length, problems: report.payProblems.length });
   } finally {
@@ -440,6 +457,6 @@ export async function settlementDue(db: Db, now: Date): Promise<boolean> {
   const cursor = await kvGet<Ymd>(db, "cursor");
   if (cursor === null) return true;
   if (cursor < lastSettleableDay(now)) return true;
-  const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') LIMIT 1");
+  const owed = await db.query("SELECT 1 FROM penalties WHERE status IN ('owed', 'sending') AND method = 'bank' LIMIT 1");
   return owed.length > 0;
 }

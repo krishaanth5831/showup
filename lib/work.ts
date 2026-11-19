@@ -6,12 +6,13 @@ import { ClaudePhotoCheck, loadClaude } from "./claude";
 import type { Db } from "./db";
 import { kvGet, kvSet } from "./kv";
 import { recheckWaiting } from "./proofs";
+import { WebPushNotifier } from "./push";
 import { type Ports, type SettleReport, runSettlement, settlementDue, syncActivities } from "./settle";
 import { StravaClient, loadStrava, stravaLinked } from "./strava";
 import { type Ymd, addDays, localDate } from "./time";
 
 export function realPorts(db: Db): Ports {
-  return { strava: new StravaClient(db), bank: new BunqBank(db), photos: new ClaudePhotoCheck(db) };
+  return { strava: new StravaClient(db), bank: new BunqBank(db), photos: new ClaudePhotoCheck(db), notify: new WebPushNotifier(db) };
 }
 
 /** true when something can check a session: the photo check, or Strava. */
@@ -70,6 +71,7 @@ export function summarize(r: SettleReport): string {
   const sick = r.judged.filter((j) => j.status === "sick").length;
   if (r.judged.length) parts.push(`${r.judged.length} day${r.judged.length === 1 ? "" : "s"} judged, ${misses} missed${sick ? `, ${sick} sick` : ""}`);
   if (r.paid.length) parts.push(`${r.paid.length} transfer${r.paid.length === 1 ? "" : "s"} sent`);
+  if (r.told) parts.push(`${r.told} notification${r.told === 1 ? "" : "s"} sent to your friend`);
   if (r.waiting.length) parts.push(r.waitingFor === "photo" ? "waiting for a photo to be checked" : "waiting for Strava");
   if (r.payProblems.length) parts.push(r.payProblems[0]);
   if (r.notes.length) parts.push(r.notes[0]);

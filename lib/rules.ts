@@ -101,7 +101,8 @@ export async function saveRules(db: Db, today: Ymd, input: Rules): Promise<SaveR
 
   if (state.locked) {
     if (state.pending) throw new RuleError("A change is already waiting. Cancel it before making another one.");
-    if (!next.friendIban || !next.friendName) throw new RuleError("While armed, the friend's name and IBAN can't be empty.");
+    if (!next.friendName) throw new RuleError("While armed, the friend's name can't be empty.");
+    if (next.collection === "bank" && !next.friendIban) throw new RuleError("While bunq sends the money, the friend's IBAN can't be empty.");
     const effectiveFrom = addDays(today, LOCK_DAYS);
     await insertVersion(db, effectiveFrom, next);
     return { effectiveFrom, delayed: true };
@@ -123,7 +124,8 @@ export async function arm(db: Db, today: Ymd): Promise<Ymd> {
   if (state.locked) throw new RuleError("Already armed.");
   if (state.pending) throw new RuleError("Arming is already planned.");
   const r = state.current.rules;
-  if (!r.friendIban || !r.friendName) throw new RuleError("Add your friend's name and IBAN first.");
+  if (!r.friendName) throw new RuleError("Add your friend's name first.");
+  if (r.collection === "bank" && !r.friendIban) throw new RuleError("Add your friend's IBAN first: bunq needs it to send the money.");
   const problems = validateRules(r);
   if (problems.length) throw new RuleError(problems.join(" "));
   const from = addDays(today, 1);
@@ -157,6 +159,8 @@ const FIELD_LABELS: Record<string, string> = {
   capPerWeekCents: "weekly cap",
   holdDays: "hold time",
   sickDaysPerMonth: "number of sick days",
+  collection: "way of collecting the money",
+  friendKeepsPercent: "share the friend keeps",
   friendName: "friend's name",
   friendIban: "friend's IBAN",
 };

@@ -1,16 +1,17 @@
 // Read-only summaries for the screens. Nothing in here changes data.
 
-import { type BunqState, loadBunq } from "./bunq";
+import { loadBunq } from "./bunq";
 import { loadClaude } from "./claude";
+import { type OwnerDetails, friendToken, ownerDetails } from "./collect";
 import type { Db } from "./db";
-import { type Activity, type Kind, type Rules, chargeFor, km, whyNot } from "./engine";
-import { kvGet, kvSet } from "./kv";
+import { type Activity, type Collection, type Kind, type Rules, chargeFor, km, whyNot } from "./engine";
+import { kvGet } from "./kv";
 import { type CheckStatus, proofTargets } from "./proofs";
 import { type RuleState, describeChanges, ruleState, rulesFor } from "./rules";
 import { activitiesOn, evidenceFor } from "./settle";
 import { type SickState, sickDaysUsed, sickState } from "./sick";
 import { loadStrava, stravaLinked } from "./strava";
-import { randomToken } from "./secrets";
+import { subscriptionCount, vapidKeys } from "./push";
 import { checksOn } from "./work";
 import { type Ymd, addDays, datesBetween, localDate, monthName, shortDate, weekStart, weekdayOf, zonedToUtc } from "./time";
 
@@ -65,6 +66,8 @@ export interface Dashboard {
   weekChargedCents: number;
   heldCents: number;
   owedCents: number;
+  /** Owed penalties the friend still has to collect by hand. */
+  owedByHandCents: number;
   friendName: string;
   /** Sick days: what is left this month and which open days one can be used for. */
   sick: SickState;
@@ -89,6 +92,8 @@ interface PenaltyRow {
   id: number;
   session_date: string;
   amount_cents: number;
+  keep_cents: number;
+  method: Collection;
   status: "owed" | "sending" | "held" | "returned";
   friend_name: string;
   friend_iban: string;
@@ -100,22 +105,33 @@ interface PenaltyRow {
 }
 
 export interface Totals {
+  /** With the friend now, not yet given back. */
   heldCents: number;
+  /** Penalties that have not reached the friend yet (by bank or by hand). */
   owedCents: number;
+  /** The part of owedCents the friend collects by hand. */
+  owedByHandCents: number;
   returnedCents: number;
+  /** The friend's share of everything collected so far: theirs to keep. */
+  keptCents: number;
   everCents: number;
 }
 
 export async function totals(db: Db): Promise<Totals> {
-  const rows = await db.query<{ status: string; amount: number; returned: number }>(
-    "SELECT status, COALESCE(SUM(amount_cents), 0)::int AS amount, COALESCE(SUM(returned_cents), 0)::int AS returned FROM penalties GROUP BY status",
+  const rows = await db.query<{ status: string; method: Collection; amount: number; returned: number; keep: number }>(
+    `SELECT status, method, COALESCE(SUM(amount_cents), 0)::int AS amount, COALESCE(SUM(returned_cents), 0)::int AS returned,
+       COALESCE(SUM(keep_cents), 0)::int AS keep FROM penalties GROUP BY status, method`,
   );
-  const t: Totals = { heldCents: 0, owedCents: 0, returnedCents: 0, everCents: 0 };
+  const t: Totals = { heldCents: 0, owedCents: 0, owedByHandCents: 0, returnedCents: 0, keptCents: 0, everCents: 0 };
   for (const r of rows) {
     t.everCents += r.amount;
     t.returnedCents += r.returned;
     if (r.status === "held") t.heldCents += r.amount - r.returned;
-    if (r.status === "owed" || r.status === "sending") t.owedCents += r.amount;
+    if (r.status === "held" || r.status === "returned") t.keptCents += r.keep;
+    if (r.status === "owed" || r.status === "sending") {
+      t.owedCents += r.amount;
+      if (r.method === "friend") t.owedByHandCents += r.amount;
+    }
   }
   return t;
 }
@@ -219,6 +235,7 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
     weekChargedCents,
     heldCents: t.heldCents,
     owedCents: t.owedCents,
+    owedByHandCents: t.owedByHandCents,
     friendName: rules.friendName,
     sick: await sickState(db, now, await checksOn(db)),
     alerts: await alerts(db, state, t),
@@ -256,16 +273,26 @@ async function alerts(db: Db, state: RuleState, t: Totals): Promise<Alert[]> {
     const sync = await kvGet<CheckState>(db, "strava_sync");
     if (sync && !sync.ok) out.push({ tone: "warn", text: `Strava could not be read. ${sync.error ?? ""}`.trim(), href: "/settings#strava", action: "Check" });
   }
-  if (willBeArmed && !bunq?.accountId) {
+  const bankWanted = rules.collection === "bank" || state.pending?.rules.collection === "bank";
+  if (willBeArmed && bankWanted && !bunq?.accountId) {
     out.push({ tone: "warn", text: "No bank connected. Penalties pile up as unpaid until bunq is connected.", href: "/settings#bank", action: "Connect" });
   }
-  if (t.owedCents > 0) {
+  if (t.owedByHandCents > 0) {
+    const friend = rules.friendName || "your friend";
+    out.push({
+      tone: "warn",
+      text: `You owe ${friend} ${formatEuro(t.owedByHandCents)}. Pay ${friend}, who then marks it as collected.`,
+      href: "/history",
+      action: "Details",
+    });
+  }
+  if (t.owedCents - t.owedByHandCents > 0) {
     const err = await db.query<{ last_error: string | null }>(
-      "SELECT last_error FROM penalties WHERE status IN ('owed','sending') AND last_error IS NOT NULL ORDER BY session_date LIMIT 1",
+      "SELECT last_error FROM penalties WHERE status IN ('owed','sending') AND method = 'bank' AND last_error IS NOT NULL ORDER BY session_date LIMIT 1",
     );
     out.push({
       tone: "warn",
-      text: `${formatEuro(t.owedCents)} in penalties has not been sent yet.${err.length ? ` ${err[0].last_error}` : ""}`,
+      text: `${formatEuro(t.owedCents - t.owedByHandCents)} in penalties has not been sent yet.${err.length ? ` ${err[0].last_error}` : ""}`,
       href: "/history",
       action: "Details",
     });
@@ -296,6 +323,8 @@ export interface HistoryRow {
   note: string | null;
   penalty: null | {
     status: PenaltyRow["status"];
+    method: Collection;
+    keepCents: number;
     friendName: string;
     releaseOn: Ymd | null;
     /** true once the hold time is over. */
@@ -343,6 +372,8 @@ export async function history(db: Db, now: Date): Promise<History> {
       penalty: p
         ? {
             status: p.status,
+            method: p.method,
+            keepCents: p.keep_cents,
             friendName: p.friend_name,
             releaseOn: p.release_on,
             releasable: !!p.release_on && p.release_on <= today,
@@ -377,17 +408,23 @@ export async function history(db: Db, now: Date): Promise<History> {
 }
 
 // ---------- the friend's page ----------
-// Money and uploaded screenshots only. Nothing that comes from Strava is shown here:
-// Strava's terms don't allow showing an athlete's data to other people.
+// The friend's own version of the app. Money and uploaded photos only. Nothing that comes
+// from Strava is shown here: Strava's terms don't allow showing an athlete's data to others.
 
-export interface FriendTransfer {
+export interface FriendPenalty {
+  id: number;
   date: Ymd;
+  kind: Kind | null;
   amountCents: number;
-  status: "held" | "returned" | "owed";
-  sentOn: Ymd | null;
+  /** The friend's share, kept for good. */
+  keepCents: number;
+  method: Collection;
+  status: "owed" | "held" | "returned";
+  /** When it reached the friend: collected by hand, or the bank transfer. */
+  collectedOn: Ymd | null;
   releaseOn: Ymd | null;
   returnedCents: number;
-  /** true when the hold time is over and it has not been fully returned. */
+  /** true when the hold time is over and it has not been given back. */
   due: boolean;
 }
 
@@ -396,41 +433,48 @@ export interface FriendView {
   ownerName: string;
   ownerIban: string;
   holdDays: number;
+  keepPercent: number;
+  /** To collect by hand from the owner. */
+  toCollectCents: number;
+  /** On its way through the bank. */
+  incomingCents: number;
   heldCents: number;
+  /** What should go back now (the friend's share already taken off). */
   dueCents: number;
-  owedCents: number;
   returnedCents: number;
-  transfers: FriendTransfer[];
+  keptCents: number;
+  penalties: FriendPenalty[];
   proofs: { id: number; date: Ymd; kind: Kind; summary: string | null; checked: boolean }[];
   /** Sick days used in the current month, for the friend to keep an eye on. */
   sick: { month: string; used: number; limit: number };
+  /** For turning on push notifications. */
+  pushKey: string;
+  phones: number;
 }
 
-export async function friendToken(db: Db): Promise<string> {
-  let token = await kvGet<string>(db, "friend_token");
-  if (!token) {
-    token = randomToken(18);
-    await kvSet(db, "friend_token", token);
-  }
-  return token;
-}
+export { friendToken };
 
 export async function friendView(db: Db, now: Date): Promise<FriendView> {
   const today = localDate(now);
   const rules = (await ruleState(db, today)).current.rules;
-  const bunq: BunqState | null = await loadBunq(db);
-  const pens = await db.query<PenaltyRow>("SELECT * FROM penalties ORDER BY session_date DESC LIMIT 100");
-  const transfers: FriendTransfer[] = pens.map((p) => {
+  const owner = await ownerDetails(db);
+  const pens = await db.query<PenaltyRow & { kind: Kind | null }>(
+    "SELECT p.*, s.kind FROM penalties p LEFT JOIN sessions s ON s.date = p.session_date ORDER BY p.session_date DESC LIMIT 100",
+  );
+  const penalties: FriendPenalty[] = pens.map((p) => {
     const status = p.status === "sending" ? "owed" : p.status;
-    const due = status === "held" && !!p.release_on && p.release_on <= today;
     return {
+      id: p.id,
       date: p.session_date,
+      kind: p.kind,
       amountCents: p.amount_cents,
+      keepCents: p.keep_cents,
+      method: p.method,
       status,
-      sentOn: p.sent_at ? localDate(new Date(p.sent_at)) : null,
+      collectedOn: p.sent_at ? localDate(new Date(p.sent_at)) : null,
       releaseOn: p.release_on,
       returnedCents: p.returned_cents,
-      due,
+      due: status === "held" && !!p.release_on && p.release_on <= today,
     };
   });
   const t = await totals(db);
@@ -440,14 +484,17 @@ export async function friendView(db: Db, now: Date): Promise<FriendView> {
   );
   return {
     friendName: rules.friendName,
-    ownerName: bunq?.accountName ?? "",
-    ownerIban: bunq?.accountIban ?? "",
+    ownerName: owner.name,
+    ownerIban: owner.iban,
     holdDays: rules.holdDays,
+    keepPercent: rules.friendKeepsPercent,
+    toCollectCents: t.owedByHandCents,
+    incomingCents: t.owedCents - t.owedByHandCents,
     heldCents: t.heldCents,
-    dueCents: transfers.filter((x) => x.due).reduce((s, x) => s + x.amountCents - x.returnedCents, 0),
-    owedCents: t.owedCents,
+    dueCents: penalties.filter((x) => x.due).reduce((sum, x) => sum + x.amountCents - x.keepCents - x.returnedCents, 0),
     returnedCents: t.returnedCents,
-    transfers,
+    keptCents: t.keptCents,
+    penalties,
     proofs: proofs.map((p) => ({
       id: p.id,
       date: p.session_date,
@@ -456,6 +503,8 @@ export async function friendView(db: Db, now: Date): Promise<FriendView> {
       checked: p.check_status === "accepted" && !!p.reading,
     })),
     sick: { month: monthName(today), used: await sickDaysUsed(db, today), limit: rules.sickDaysPerMonth },
+    pushKey: (await vapidKeys(db)).publicKey,
+    phones: await subscriptionCount(db),
   };
 }
 
@@ -469,6 +518,9 @@ export interface SettingsView {
   claude: { connected: boolean; hint: string; connectedAt: string | null };
   bank: { connected: boolean; env: "sandbox" | "production" | null; userName: string; accountLabel: string; accountIban: string; accountName: string; lastCheck: CheckState | null };
   friendLink: string;
+  owner: OwnerDetails;
+  /** How many of the friend's phones get notifications. */
+  phones: number;
   lastRun: { at: string; judged: number; problems: number } | null;
   canArm: { ok: boolean; missing: string[] };
 }
@@ -482,8 +534,11 @@ export async function settingsView(db: Db, now: Date): Promise<SettingsView> {
   const r = rules.current.rules;
   const missing: string[] = [];
   if (!claude?.apiKey) missing.push("add a Claude API key");
-  if (!bunq?.accountId) missing.push("connect bunq");
-  if (!r.friendName || !r.friendIban) missing.push("add your friend's name and IBAN");
+  if (!r.friendName) missing.push("add your friend's name");
+  if (r.collection === "bank") {
+    if (!bunq?.accountId) missing.push("connect bunq");
+    if (!r.friendIban) missing.push("add your friend's IBAN");
+  }
   return {
     rules,
     pendingChanges: rules.pending ? describeChanges(r, rules.pending.rules) : [],
@@ -506,6 +561,8 @@ export async function settingsView(db: Db, now: Date): Promise<SettingsView> {
       lastCheck: await kvGet<CheckState>(db, "bank_check"),
     },
     friendLink: `/f/${await friendToken(db)}`,
+    owner: await ownerDetails(db),
+    phones: await subscriptionCount(db),
     lastRun: await kvGet(db, "last_run"),
     canArm: { ok: missing.length === 0, missing },
   };

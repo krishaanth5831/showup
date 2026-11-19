@@ -5,7 +5,8 @@
 //   DEMO_TODAY=run|strength|done|rest npm run demo   -> choose what today looks like
 //
 // Sign in with the password printed at the end. No bank, Strava or Claude is connected in
-// the demo: a stand-in reads the made-up photos, and nothing here can move money.
+// the demo: a stand-in reads the made-up photos, the made-up friend collects and gives back
+// by hand, and nothing here can move money or send a notification.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -59,18 +60,21 @@ async function main() {
   const { getDb } = await import("../lib/db");
   const { DEFAULT_RULES } = await import("../lib/engine");
   const { kvSet } = await import("../lib/kv");
+  const { markCollected, markReturned, saveOwnerDetails } = await import("../lib/collect");
   const { saveProof } = await import("../lib/proofs");
   const { arm, ensureRules, rulesFor, saveRules } = await import("../lib/rules");
   const { hashPassword } = await import("../lib/secrets");
   const { runSettlement } = await import("../lib/settle");
   const { claimSick } = await import("../lib/sick");
   const { addDays, datesBetween, localDate, weekStart, weekdayOf } = await import("../lib/time");
-  const { FakeBank, FakePhotoCheck, FakeStrava, at } = await import("../tests/fakes");
+  const { FakeBank, FakeNotifier, FakePhotoCheck, FakeStrava, at } = await import("../tests/fakes");
 
   const db = await getDb();
   const strava = new FakeStrava();
   strava.linked = false;
   const bank = new FakeBank();
+  bank.linked = false;
+  const notify = new FakeNotifier();
   const photos = new FakePhotoCheck();
   photos.show = (input) => {
     if (input.kind === "strength") return { durationS: 48 * 60 + Number(input.day.slice(8)), summary: "Traditional strength training, 48 min (made-up demo photo)" };
@@ -85,7 +89,8 @@ async function main() {
   const thisMonday = weekStart(today);
   const start = addDays(thisMonday, -35);
   const opened = addDays(start, -1);
-  const friend = { friendName: "Sam de Vries", friendIban: "NL91ABNA0417164300" };
+  const friend = { friendName: "Sam de Vries", friendIban: "" };
+  await saveOwnerDetails(db, { name: "Alex", iban: "NL91ABNA0417164300" });
 
   // What today should look like (optional).
   const want = process.env.DEMO_TODAY;
@@ -112,14 +117,14 @@ async function main() {
       await saveProof(db, at(day, "19:40"), day, fakeScreenshot(shot), photos);
       shot++;
     }
-    // The friend gives the first penalty back three weeks in, and pays for pizza once.
-    if (day === addDays(start, 24)) {
-      clock = at(day, "12:00");
-      bank.receive(1000, friend.friendIban, friend.friendName, "Showup, here you go");
-      bank.receive(1250, friend.friendIban, friend.friendName, "pizza");
-    }
     clock = at(addDays(day, 1), "03:30");
-    await runSettlement(db, { strava, bank, photos }, clock);
+    await runSettlement(db, { strava, bank, photos, notify }, clock);
+    // The friend collects each penalty the evening after the miss (except the latest one, so
+    // there is something left to collect), and gives back whatever is due a few days late.
+    const owed = await db.query<{ id: number; session_date: string }>("SELECT id, session_date FROM penalties WHERE status = 'owed'");
+    for (const p of owed) if (p.session_date < addDays(today, -3)) await markCollected(db, at(addDays(p.session_date, 1), "20:00"), p.id, notify);
+    const due = await db.query<{ id: number }>("SELECT id FROM penalties WHERE status = 'held' AND release_on <= $1", [addDays(day, -3)]);
+    for (const p of due) await markReturned(db, at(day, "18:00"), p.id, notify);
   }
 
   if (want === "done") await saveProof(db, realNow, today, fakeScreenshot(99), photos);

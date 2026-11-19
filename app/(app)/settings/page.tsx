@@ -15,7 +15,7 @@ import {
 import { Chip, PageSkeleton, Section } from "@/app/ui/bits";
 import { ActionButton } from "@/app/ui/forms";
 import { buttonClass } from "@/app/ui/styles";
-import { BunqForm, ClaudeForm, CopyLink, RulesForm, StravaAppForm } from "@/app/ui/settings-forms";
+import { BunqForm, ClaudeForm, CopyLink, OwnerForm, RulesForm, StravaAppForm } from "@/app/ui/settings-forms";
 import { requireUser } from "@/lib/auth";
 import { euros, prettyIban } from "@/lib/engine";
 import { originOf } from "@/lib/origin";
@@ -68,7 +68,7 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         {s.rules.locked ? (
           <div className="flex flex-col gap-4">
             <p className="max-w-[60ch] leading-relaxed text-muted">
-              Every missed session sends money to {friend}. The first miss costs {euros(r.baseCents)}, and each further miss in a row multiplies it by{" "}
+              Every missed session costs money: {r.collection === "bank" ? `bunq sends it to ${friend}` : `${friend} is notified and collects it from you`}. The first miss costs {euros(r.baseCents)}, and each further miss in a row multiplies it by{" "}
               {r.multiplier}, up to {euros(r.capPerMissCents)} per miss and {euros(r.capPerWeekCents)} per week.
             </p>
             {s.rules.pending ? (
@@ -103,14 +103,17 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         ) : (
           <div className="flex flex-col gap-4">
             <p className="max-w-[60ch] leading-relaxed text-muted">
-              You are in practice mode: sessions are tracked, nothing is charged. Once real money is on, missed sessions are paid to {friend}{" "}
-              automatically, and changing the rules or switching it off takes {LOCK_DAYS} days.
+              You are in practice mode: sessions are tracked, nothing is charged. Once real money is on,{" "}
+              {r.collection === "bank"
+                ? `bunq pays every missed session to ${friend} by itself`
+                : `${friend} is notified of every missed session and collects the penalty from you`}
+              , and changing the rules or switching it off takes {LOCK_DAYS} days.
             </p>
             {s.canArm.ok ? (
               <ActionButton
                 action={armAction}
                 variant="danger"
-                confirm={`From tomorrow, each missed session sends ${euros(r.baseCents)} or more to ${friend}. You can't undo a penalty, and switching off takes ${LOCK_DAYS} days. Start?`}
+                confirm={`From tomorrow, each missed session costs ${euros(r.baseCents)} or more, ${r.collection === "bank" ? `sent to ${friend} by bunq` : `collected by ${friend}`}. You can't undo a penalty, and switching off takes ${LOCK_DAYS} days. Start?`}
               >
                 Switch on real money
               </ActionButton>
@@ -224,7 +227,13 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
         )}
       </Section>
 
-      <Section id="bank" title="Bank">
+      <Section id="bank" title={r.collection === "bank" ? "Bank" : "Bank (not needed)"}>
+        {r.collection !== "bank" && (
+          <p className="mb-5 max-w-[60ch] text-sm leading-relaxed text-muted">
+            Your friend collects the money by hand, so no bank is needed. Connect bunq only if you want it to send penalties by itself (Rules, How the
+            money moves). That needs bunq Pro or Elite.
+          </p>
+        )}
         {s.bank.connected ? (
           <div className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center gap-3">
@@ -276,14 +285,22 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
 
       <Section title={`${friend === "your friend" ? "Your friend" : friend}'s page`}>
         <p className="mb-5 max-w-[60ch] text-sm leading-relaxed text-muted">
-          A read-only page for {friend}: the money being held, when each transfer is due back and where to send it. Anyone with this link can
-          open it, so share it with nobody else.
+          {friend}&apos;s own version of Showup: what to collect from you, what they hold, when to give it back and what they keep. They can add it
+          to their Home Screen and turn on notifications there. Anyone with this link can open it, so share it with nobody else.
         </p>
         <div className="flex flex-col gap-4">
           <CopyLink url={origin + s.friendLink} />
+          <p className="text-sm text-muted">
+            {s.phones > 0
+              ? `Notifications are on for ${s.phones} of ${friend}'s phone${s.phones === 1 ? "" : "s"}.`
+              : `${friend === "your friend" ? "Your friend has" : `${friend} has`} not turned on notifications yet.`}
+          </p>
           <ActionButton action={newFriendLinkAction} variant="quiet" confirm="Make a new link? The current one stops working.">
             Make a new link
           </ActionButton>
+        </div>
+        <div className="mt-8">
+          <OwnerForm name={s.owner.name} iban={s.owner.iban} />
         </div>
       </Section>
 

@@ -1,4 +1,4 @@
-// Stand-ins for Strava, the bank and the photo check, used by the tests and by the demo
+// Stand-ins for Strava, the bank, the photo check and the friend's phone, used by the tests and by the demo
 // data script. The fakes can be told to fail in the ways the real services do.
 
 import type { Activity, PhotoReading } from "../lib/engine";
@@ -6,6 +6,8 @@ import {
   BankError,
   type BankPayment,
   type BankPort,
+  type Notice,
+  type NotifyPort,
   type PayRequest,
   PhotoCheckError,
   type PhotoCheckInput,
@@ -175,5 +177,19 @@ export class FakePhotoCheck implements PhotoCheckPort {
       summary: input.kind === "run" ? `Run, ${(5 + n / 100).toFixed(2)} km` : "Strength workout, 30 min",
       ...over,
     };
+  }
+}
+
+/** The friend's phone. `down` makes every push service fail, `phones` how many are subscribed. */
+export class FakeNotifier implements NotifyPort {
+  phones = 1;
+  down = false;
+  sent: Notice[] = [];
+
+  async notifyFriend(notice: Notice): Promise<{ subscribers: number; sent: number }> {
+    if (this.phones === 0) return { subscribers: 0, sent: 0 };
+    if (this.down) return { subscribers: this.phones, sent: 0 };
+    this.sent.push(notice);
+    return { subscribers: this.phones, sent: this.phones };
   }
 }

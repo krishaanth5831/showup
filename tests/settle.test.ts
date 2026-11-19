@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyBankSwitch, planBankSwitch } from "../lib/bank-switch";
 import { type Db, openTestDb } from "../lib/db";
 import { DEFAULT_RULES } from "../lib/engine";
+import { CollectError, friendToken, isFriendToken, markCollected, markReturned } from "../lib/collect";
 import { kvGet, kvSet } from "../lib/kv";
 import { PhotoCheckError } from "../lib/ports";
 import { ProofError, proofTargets, saveProof } from "../lib/proofs";
@@ -9,8 +10,8 @@ import { LOCK_DAYS, RuleError, arm, cancelPending, disarm, ensureRules, ruleStat
 import { activitiesOn, penaltyRef, runSettlement, settlementDue } from "../lib/settle";
 import { SickError, claimSick, sickDaysUsed, sickState, unclaimSick } from "../lib/sick";
 import { type Ymd, addDays, datesBetween } from "../lib/time";
-import { dashboard, history } from "../lib/views";
-import { FakeBank, FakePhotoCheck, FakeStrava, at } from "./fakes";
+import { dashboard, friendView, history } from "../lib/views";
+import { FakeBank, FakeNotifier, FakePhotoCheck, FakeStrava, at } from "./fakes";
 
 process.env.APP_SECRET = "test-secret-that-is-long-enough-0123456789";
 
@@ -22,6 +23,7 @@ let db: Db;
 let strava: FakeStrava;
 let bank: FakeBank;
 let photos: FakePhotoCheck;
+let notify: FakeNotifier;
 let clock: Date;
 
 beforeAll(async () => {
@@ -35,6 +37,7 @@ beforeEach(async () => {
   strava = new FakeStrava();
   bank = new FakeBank();
   photos = new FakePhotoCheck();
+  notify = new FakeNotifier();
   clock = at("2026-11-22", "10:00");
   bank.now = () => clock;
 });
@@ -42,7 +45,7 @@ beforeEach(async () => {
 /** One run of the nightly job at the given moment. */
 async function settleAt(day: Ymd, time = "03:30") {
   clock = at(day, time);
-  return runSettlement(db, { strava, bank, photos }, clock);
+  return runSettlement(db, { strava, bank, photos, notify }, clock);
 }
 
 /** Runs the nightly job after each day in the range (at 03:30 the next morning). */
@@ -50,10 +53,14 @@ async function nightly(from: Ymd, to: Ymd) {
   for (const d of datesBetween(from, to)) await settleAt(addDays(d, 1));
 }
 
-/** Opens the app on Sunday 22 Nov (a rest day), sets the friend and arms: real money from Monday 23 Nov. */
+/**
+ * Opens the app on Sunday 22 Nov (a rest day), sets the friend and arms: real money from Monday 23 Nov.
+ * Unless told otherwise the money goes through the bank and the friend keeps nothing, which is
+ * what most of these tests are about; the "friend collects" tests say so.
+ */
 async function armed(over: Partial<typeof DEFAULT_RULES> = {}) {
   await ensureRules(db, "2026-11-22");
-  await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND, ...over });
+  await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND, collection: "bank", friendKeepsPercent: 0, ...over });
   await arm(db, "2026-11-22");
 }
 
@@ -212,7 +219,7 @@ describe("judging days", () => {
 
   it("starts a fresh streak when practice turns into real money", async () => {
     await practice();
-    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND });
+    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND, collection: "bank", friendKeepsPercent: 0 });
     await nightly("2026-11-22", "2026-11-24"); // two practice misses
     await arm(db, "2026-11-25"); // armed from Thursday 26
     await nightly("2026-11-25", "2026-11-28");
@@ -251,7 +258,7 @@ describe("catching up and running twice", () => {
   it("lets only one of two simultaneous runs do the work", async () => {
     await armed();
     clock = at("2026-11-29", "03:30");
-    const [a, b] = await Promise.all([runSettlement(db, { strava, bank, photos }, clock), runSettlement(db, { strava, bank, photos }, clock)]);
+    const [a, b] = await Promise.all([runSettlement(db, { strava, bank, photos, notify }, clock), runSettlement(db, { strava, bank, photos, notify }, clock)]);
     expect([a.busy, b.busy].sort()).toEqual([false, true]);
     expect(bank.sent).toHaveLength(4);
     expect(bank.sentTotal).toBe(15000);
@@ -455,7 +462,7 @@ describe("rule changes", () => {
   it("arming starts tomorrow, and can be called off before then", async () => {
     await practice();
     await expect(arm(db, "2026-11-22")).rejects.toThrow(RuleError); // no friend yet
-    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND });
+    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, ...FRIEND, collection: "bank", friendKeepsPercent: 0 });
     expect(await arm(db, "2026-11-22")).toBe("2026-11-23");
     expect((await rulesFor(db, "2026-11-22"))?.rules.armed).toBe(false);
     expect((await rulesFor(db, "2026-11-23"))?.rules.armed).toBe(true);
@@ -675,6 +682,127 @@ describe("the photo check", () => {
   });
 });
 
+describe("when the friend collects the money", () => {
+  const byHand = (over: Partial<typeof DEFAULT_RULES> = {}) => armed({ collection: "friend", friendKeepsPercent: 10, friendIban: "", ...over });
+  const pen = async (d: Ymd) =>
+    (await db.query<P & { id: number; method: string; keep_cents: number; status: string }>("SELECT * FROM penalties WHERE session_date = $1", [d]))[0];
+
+  it("needs no bank or IBAN to arm, only the friend's name", async () => {
+    await ensureRules(db, "2026-11-22");
+    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, friendName: "", friendIban: "" });
+    await expect(arm(db, "2026-11-22")).rejects.toThrow("friend's name");
+    await saveRules(db, "2026-11-22", { ...DEFAULT_RULES, friendName: "Sam", friendIban: "" });
+    await expect(arm(db, "2026-11-22")).resolves.toBe("2026-11-23");
+  });
+
+  it("turns a miss into money owed by hand, with the friend's share set aside, that bunq never sends", async () => {
+    await byHand();
+    await settleAt("2026-11-24");
+    expect(await pen("2026-11-23")).toMatchObject({ method: "friend", status: "owed", amount_cents: 1000, keep_cents: 100 });
+    await settleAt("2026-11-25");
+    expect(bank.payCalls).toBe(0);
+    expect(bank.listCalls).toBe(0);
+    expect(await settlementDue(db, at("2026-11-25", "03:31"))).toBe(false);
+  });
+
+  it("tells the friend once per missed day, with the amount to collect and their share", async () => {
+    await byHand();
+    await settleAt("2026-11-24");
+    await settleAt("2026-11-24", "09:00");
+    expect(notify.sent).toHaveLength(1);
+    expect(notify.sent[0].body).toBe("Monday's run (Mon 23 Nov) was skipped. Collect €10 from them. You keep €1 of it.");
+    expect(notify.sent[0].url).toMatch(/^\/f\//);
+  });
+
+  it("tells the friend about a miss even when the weekly cap makes it free, but never about practice", async () => {
+    await practice();
+    await nightly("2026-11-22", "2026-11-24");
+    expect(notify.sent).toEqual([]);
+    await db.exec("TRUNCATE rules, sessions, penalties, kv RESTART IDENTITY CASCADE");
+    await byHand({ capPerWeekCents: 1000, capPerMissCents: 1000 });
+    await nightly("2026-11-23", "2026-11-24");
+    expect(notify.sent.map((n) => n.body)).toEqual([
+      "Monday's run (Mon 23 Nov) was skipped. Collect €10 from them. You keep €1 of it.",
+      "Tuesday's strength workout (Tue 24 Nov) was skipped. This week's limit is reached, so it costs nothing more.",
+    ]);
+  });
+
+  it("tries again when the push service fails, and doesn't save up messages while no phone is set up", async () => {
+    await byHand();
+    notify.down = true;
+    await settleAt("2026-11-24");
+    expect(notify.sent).toEqual([]);
+    notify.down = false;
+    await settleAt("2026-11-24", "09:00");
+    expect(notify.sent).toHaveLength(1);
+    notify.phones = 0;
+    await settleAt("2026-11-25");
+    notify.phones = 1;
+    await settleAt("2026-11-25", "09:00");
+    expect(notify.sent).toHaveLength(1); // Tuesday's miss was "told" to nobody, and stays that way
+  });
+
+  it("moves along only from the friend's marks: collected, held for 14 days, then 90% back", async () => {
+    await byHand();
+    await settleAt("2026-11-24");
+    const p = await pen("2026-11-23");
+    const held = await markCollected(db, at("2026-11-24", "20:00"), p.id, notify);
+    expect(held.release_on).toBe("2026-12-08");
+    await expect(markCollected(db, at("2026-11-24", "20:01"), p.id, notify)).rejects.toThrow(CollectError);
+    expect(notify.sent.at(-1)?.title).toBe("Collected: €10");
+    expect((await friendView(db, at("2026-11-25", "09:00"))).toCollectCents).toBe(0);
+
+    // Hold over: the friend hears about it once, gives back 9 and keeps 1.
+    await settleAt("2026-12-08", "09:00");
+    await settleAt("2026-12-08", "10:00");
+    expect(notify.sent.filter((n) => n.title === "Time to give money back")).toHaveLength(1);
+    const v = await friendView(db, at("2026-12-08", "12:00"));
+    expect([v.dueCents, v.keptCents, v.heldCents]).toEqual([900, 100, 1000]);
+    await markReturned(db, at("2026-12-08", "18:00"), p.id, notify);
+    expect(await pen("2026-11-23")).toMatchObject({ status: "returned", returned_cents: 900 });
+    const after = await friendView(db, at("2026-12-08", "19:00"));
+    expect([after.dueCents, after.keptCents, after.heldCents, after.returnedCents]).toEqual([0, 100, 0, 900]);
+  });
+
+  it("can't mark a bank penalty by hand, and bank returns ignore hand-collected ones", async () => {
+    await armed({ friendKeepsPercent: 10 });
+    await settleAt("2026-11-24");
+    const p = await pen("2026-11-23");
+    expect(p).toMatchObject({ method: "bank", status: "held", keep_cents: 100 });
+    await expect(markCollected(db, at("2026-11-24", "20:00"), p.id, notify)).rejects.toThrow(CollectError);
+    // The friend gives back 9 of the 10 through the bank: that is all of it, minus their share.
+    bank.receive(900, FRIEND.friendIban, FRIEND.friendName, "showup");
+    await settleAt("2026-11-24", "09:00");
+    expect(await pen("2026-11-23")).toMatchObject({ status: "returned", returned_cents: 900 });
+  });
+
+  it("keeps hand-collected money real when a real bunq key replaces a test key", async () => {
+    await kvSet(db, "ledger_env", "sandbox");
+    await byHand();
+    await settleAt("2026-11-24");
+    await applyBankSwitch(db, at("2026-11-24", "10:00"), "production", await planBankSwitch(db, "2026-11-24", "production"));
+    expect(await pen("2026-11-23")).toMatchObject({ method: "friend", status: "owed" });
+    expect((await session("2026-11-23")).practice).toBe(false);
+    expect((await ruleState(db, "2026-11-24")).current.rules.armed).toBe(true);
+  });
+
+  it("shows the owner what is still to pay", async () => {
+    await byHand();
+    await settleAt("2026-11-24");
+    const d = await dashboard(db, at("2026-11-24", "09:00"));
+    expect(d.owedByHandCents).toBe(1000);
+    expect(d.alerts.map((a) => a.text)).toContain("You owe Sam Friend €10. Pay Sam Friend, who then marks it as collected.");
+    expect(d.alerts.map((a) => a.text).join(" ")).not.toContain("No bank connected");
+  });
+
+  it("only accepts the friend's own link", async () => {
+    const token = await friendToken(db);
+    expect(await isFriendToken(db, token)).toBe(true);
+    expect(await isFriendToken(db, `${token}x`)).toBe(false);
+    expect(await isFriendToken(db, "")).toBe(false);
+  });
+});
+
 describe("Strava copy", () => {
   it("mirrors deletions and forgets details after 7 days", async () => {
     await armed();
@@ -730,7 +858,7 @@ describe("test money and real money", () => {
     const real = new FakeBank();
     real.now = () => clock;
     clock = at("2026-11-28", "03:30");
-    await runSettlement(db, { strava, bank: real, photos }, clock);
+    await runSettlement(db, { strava, bank: real, photos, notify }, clock);
     expect(await penalties()).toEqual([]);
     expect(real.sent).toEqual([]);
     expect((await session("2026-11-25")).practice).toBe(true);

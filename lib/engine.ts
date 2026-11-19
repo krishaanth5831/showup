@@ -5,6 +5,14 @@ import { type Weekday, type Ymd, shortDate } from "./time";
 
 export type Kind = "run" | "strength";
 
+/**
+ * How a penalty reaches the friend.
+ *  - friend: the friend is notified and collects it from the owner by hand, then marks it
+ *    collected on their page.
+ *  - bank: the app sends it from the owner's bunq account by itself.
+ */
+export type Collection = "friend" | "bank";
+
 export interface Rules {
   /** false = practice mode: everything is tracked, nothing is charged. */
   armed: boolean;
@@ -26,7 +34,12 @@ export interface Rules {
   holdDays: number;
   /** Training days per calendar month that can be marked as sick: no charge, multiplier untouched. */
   sickDaysPerMonth: number;
+  /** Who moves the money: the friend collects it by hand, or bunq sends it. */
+  collection: Collection;
+  /** The friend keeps this share of every penalty for good and gives the rest back after the hold. */
+  friendKeepsPercent: number;
   friendName: string;
+  /** Needed when bunq sends the money; optional when the friend collects it. */
   friendIban: string;
 }
 
@@ -41,9 +54,16 @@ export const DEFAULT_RULES: Rules = {
   capPerWeekCents: 15000,
   holdDays: 14,
   sickDaysPerMonth: 3,
+  collection: "friend",
+  friendKeepsPercent: 10,
   friendName: "",
   friendIban: "",
 };
+
+/** The friend's share of a penalty, in whole cents (rounded down, so the owner never pays a fraction more). */
+export function keepCents(amountCents: number, rules: Rules): number {
+  return Math.floor((amountCents * rules.friendKeepsPercent) / 100);
+}
 
 /** One Strava activity, reduced to what the rules need. */
 export interface Activity {
@@ -288,6 +308,9 @@ export function validateRules(r: Rules): string[] {
   if (!Number.isInteger(r.holdDays) || r.holdDays < 1 || r.holdDays > 365) problems.push("Hold time must be 1 to 365 days.");
   if (!Number.isInteger(r.sickDaysPerMonth) || r.sickDaysPerMonth < 0 || r.sickDaysPerMonth > 10)
     problems.push("Sick days per month must be a whole number from 0 to 10.");
+  if (r.collection !== "friend" && r.collection !== "bank") problems.push("Unknown way of collecting the money.");
+  if (!Number.isInteger(r.friendKeepsPercent) || r.friendKeepsPercent < 0 || r.friendKeepsPercent > 50)
+    problems.push("The friend's share must be a whole percentage from 0 to 50.");
   if (r.friendIban && !isValidIban(r.friendIban)) problems.push("The friend's IBAN is not a valid IBAN.");
   return problems;
 }

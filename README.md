@@ -44,10 +44,23 @@ costs nothing and leaves the count of misses in a row where it was, as if the da
 been planned. It is used on the day itself (until 03:00 the next morning), and it comes
 back if you train anyway. Your friend can see how many you have used.
 
-**The money.** Each penalty is its own bank transfer to your friend, with a reference like
-`SHOWUP-20261123`. Your friend gets a private link showing what they hold and when each
-transfer is due back (14 days by default). When they send money back with "showup" in the
-description, the app marks it as returned by itself.
+**The money.** Your friend gets their own version of the app: a private link they can add
+to their Home Screen. By default no bank is involved:
+
+1. You miss a day. At 03:00 your friend's phone gets a notification: what was skipped and
+   how much to collect from you.
+2. You pay them (cash, a transfer, a payment request), and they tap "I've got it".
+3. They hold it for 14 days. Then they get another notification, give back 90% and keep
+   10% for themselves. They tap "I've given it back".
+
+Your Today screen shows what you still owe until your friend marks it collected. The share
+your friend keeps (10%) and the hold time are rules like the others, so they can't be
+changed on a whim once real money is on.
+
+If you'd rather not depend on your friend chasing you, bunq can send every penalty by
+itself (Rules, How the money moves; needs bunq Pro or Elite). Each penalty is then its own
+transfer with a reference like `SHOWUP-20261123`, and money your friend sends back with
+"showup" in the description is matched by itself. The friend keeps their share either way.
 
 **Practice first.** Nothing is charged until you switch on real money in Settings. Until
 then every day is tracked and you see what it would have cost.
@@ -69,18 +82,23 @@ the demo, so nothing can move money. `DEMO_TODAY=run npm run demo` (or `strength
 
 ## Use it for real
 
-1. Start the app (`npm run dev`, or deploy it, see below) and choose a password.
-2. **Settings, Rules:** enter your friend's full name and IBAN.
+1. Put the app online (see below), so your friend's phone can reach it, and choose a password.
+2. **Settings, Rules:** enter your friend's full name.
 3. **Settings, Photo check:** paste a Claude API key (console.anthropic.com, API keys, with
    some credit under Billing). Each check costs a few cents.
-4. **Settings, Bank:** paste a bunq API key.
-   - API keys need bunq Pro or Elite.
-   - In the bunq app: Profile, Security & Settings, Developers, API keys.
-   - Before pasting it anywhere, open the key's menu and switch on "Allow all IP addresses",
-     otherwise bunq refuses a server whose address changes.
-   - Press "Send a 1 cent test" once, to see that the name and IBAN are accepted.
-5. Send your friend their link (Settings, friend's page).
-6. Train in practice mode for a few days, then switch on real money. It starts the next day.
+4. **Settings, friend's page:** enter your name (and, if you like, your IBAN for the money
+   coming back), then send your friend their link. On their phone they open it, add it to the
+   Home Screen (on an iPhone: Share, Add to Home Screen), open it from there and tap
+   "Turn on notifications". Settings shows when that worked.
+5. Train in practice mode for a few days, then switch on real money. It starts the next day.
+
+Only if bunq sends the money (Rules, How the money moves): add the friend's IBAN and paste a
+bunq API key in Settings, Bank.
+- API keys need bunq Pro or Elite.
+- In the bunq app: Profile, Security & Settings, Developers, API keys.
+- Before pasting it anywhere, open the key's menu and switch on "Allow all IP addresses",
+  otherwise bunq refuses a server whose address changes.
+- Press "Send a 1 cent test" once, to see that the name and IBAN are accepted.
 
 Strava is optional (Settings, Strava). Creating a Strava API app needs a Strava subscription.
 
@@ -118,7 +136,12 @@ when you open the app (or press "Check now").
 
 ## What it does not do
 
-- It cannot stop your friend from sending the money back early. Pick a strict friend.
+- It cannot make you pay. When your friend collects by hand, the app only tells them what to
+  collect; the rest is between the two of you. Pick a friend who will chase you.
+- It cannot stop your friend from giving the money back early. Pick a strict friend.
+- Your friend's page is a secret link, and you can see it in Settings. Every "collected" and
+  "given back" tap sends a notification to your friend's phone, so a tap they didn't make
+  does not go unnoticed.
 - Claude can be fooled by a well-made fake. Your friend sees every photo on their page, so a fake would have to fool them too.
 - It does not ask for proof that you are sick. Three sick days a month is the whole allowance, and a fourth is a miss.
 - It does not move the money on to an investment account. Brokers generally refuse deposits

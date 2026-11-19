@@ -21,12 +21,14 @@ function moneyLine(row: HistoryRow): string | null {
   if (row.practice) return `Practice. Would have cost ${euros(row.chargeCents)}.`;
   if (!row.penalty) return row.rawCents > 0 ? "Weekly cap reached, so nothing was charged." : null;
   const p = row.penalty;
-  if (p.status === "returned") return `${p.friendName} gave it back.`;
+  const kept = p.keepCents > 0 ? ` ${p.friendName} keeps ${euros(p.keepCents)}.` : "";
+  if (p.status === "returned") return `${p.friendName} gave ${euros(p.returnedCents)} back.${kept}`;
   if (p.status === "held") {
     const part = p.returnedCents > 0 ? ` ${euros(p.returnedCents)} is back already.` : "";
-    if (p.releasable) return `${p.friendName} can send it back now.${part}`;
-    return `${p.friendName} holds it until ${p.releaseOn ? shortDate(p.releaseOn) : "later"}.${part}`;
+    if (p.releasable) return `${p.friendName} can give it back now.${part}${kept}`;
+    return `${p.friendName} holds it until ${p.releaseOn ? shortDate(p.releaseOn) : "later"}.${part}${kept}`;
   }
+  if (p.method === "friend") return `Not collected yet. Pay ${p.friendName}, who then marks it as collected.`;
   return `Not sent yet.${p.error ? ` ${p.error}` : ""}`;
 }
 
