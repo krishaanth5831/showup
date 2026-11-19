@@ -74,7 +74,7 @@ async function Today() {
           hot={d.missStreak > 0}
         />
         <Figure label="This week" value={euros(d.weekChargedCents)} note={`of ${euros(d.rules.capPerWeekCents)} at most`} hot={d.weekChargedCents > 0 && d.mode === "armed"} />
-        <Figure label={`${friend} holds`} value={euros(d.heldCents)} note={d.owedCents > 0 ? `${euros(d.owedCents)} not sent yet` : `for ${d.rules.holdDays} days each`} />
+        <Figure label={d.friendName ? `${d.friendName} holds` : "Your friend holds"} value={euros(d.heldCents)} note={d.owedCents > 0 ? `${euros(d.owedCents)} not sent yet` : `for ${d.rules.holdDays} days each`} />
       </dl>
       {d.mode === "practice" && (
         <p className="text-sm leading-relaxed text-muted">
