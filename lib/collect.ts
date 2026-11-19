@@ -84,15 +84,18 @@ export async function markCollected(db: Db, now: Date, id: number, notify: Notif
   return p;
 }
 
-/** The friend gave the money back, keeping their share. */
+/** The friend gave the money back, keeping their share. Only once the hold time is over. */
 export async function markReturned(db: Db, now: Date, id: number, notify: NotifyPort): Promise<PenaltyRow> {
   const rows = await db.query<PenaltyRow>(
     `UPDATE penalties SET status = 'returned', returned_cents = amount_cents - keep_cents, returned_at = $2
-     WHERE id = $1 AND method = 'friend' AND status = 'held'
+     WHERE id = $1 AND method = 'friend' AND status = 'held' AND release_on <= $3
      RETURNING id, session_date, amount_cents, keep_cents, hold_days, release_on`,
-    [id, now],
+    [id, now, localDate(now)],
   );
-  if (!rows.length) throw new CollectError("That one is already marked as given back.");
+  if (!rows.length) {
+    const early = await db.query("SELECT 1 FROM penalties WHERE id = $1 AND status = 'held' AND release_on > $2", [id, localDate(now)]);
+    throw new CollectError(early.length ? "Not yet: the hold time isn't over." : "That one is already marked as given back.");
+  }
   const p = rows[0];
   await logEvent(db, now, "collect", `${p.session_date}: friend marked ${p.amount_cents - p.keep_cents} cents as given back`);
   await safeNotify(db, notify, {

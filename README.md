@@ -47,8 +47,9 @@ back if you train anyway. Your friend can see how many you have used.
 **The money.** Your friend gets their own version of the app: a private link they can add
 to their Home Screen. By default no bank is involved:
 
-1. You miss a day. At 03:00 your friend's phone gets a notification: what was skipped and
-   how much to collect from you.
+1. You miss a day. When it is judged the next night (the nightly check runs at 02:30 UTC,
+   so 03:30 in winter and 04:30 in summer, Amsterdam time) your friend's phone gets a
+   notification: what was skipped and how much to collect from you.
 2. You pay them (cash, a transfer, a payment request), and they tap "I've got it".
 3. They hold it for 14 days. Then they get another notification, give back 90% and keep
    10% for themselves. They tap "I've given it back".

@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { createPassword, login, logout, requireUser } from "@/lib/auth";
 import { BunqClient, bunqClient, bunqConnect, loadBunq, saveBunq } from "@/lib/bunq";
 import { ClaudePhotoCheck, connectClaude, loadClaude } from "@/lib/claude";
-import { saveOwnerDetails } from "@/lib/collect";
+import { ownerDetails, saveOwnerDetails } from "@/lib/collect";
 import { getDb } from "@/lib/db";
 import { type Kind, type Rules, isValidIban, normalizeIban } from "@/lib/engine";
 import { kvDelete, kvSet, logEvent } from "@/lib/kv";
@@ -285,6 +285,7 @@ export async function armAction(_prev: FormState): Promise<FormState> {
     const rules = (await ruleState(db, localDate(new Date()))).current.rules;
     if (!claude?.apiKey) return { error: "Add a Claude API key first, so photos can be checked." };
     if (rules.collection === "bank" && !bunq?.accountId) return { error: "Connect bunq first, or let your friend collect the money by hand." };
+    if (rules.collection === "friend" && !(await ownerDetails(db)).name) return { error: "Add your own name first, so your friend knows who to collect from." };
     const from = await arm(db, localDate(new Date()));
     await logEvent(db, new Date(), "rules", `armed from ${from}`);
     refresh();

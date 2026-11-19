@@ -756,6 +756,7 @@ describe("when the friend collects the money", () => {
     await settleAt("2026-12-08", "09:00");
     await settleAt("2026-12-08", "10:00");
     expect(notify.sent.filter((n) => n.title === "Time to give money back")).toHaveLength(1);
+    await expect(markReturned(db, at("2026-12-07", "23:00"), p.id, notify)).rejects.toThrow("hold time isn't over");
     const v = await friendView(db, at("2026-12-08", "12:00"));
     expect([v.dueCents, v.keptCents, v.heldCents]).toEqual([900, 100, 1000]);
     await markReturned(db, at("2026-12-08", "18:00"), p.id, notify);

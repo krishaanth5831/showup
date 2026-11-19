@@ -535,6 +535,7 @@ export async function settingsView(db: Db, now: Date): Promise<SettingsView> {
   const missing: string[] = [];
   if (!claude?.apiKey) missing.push("add a Claude API key");
   if (!r.friendName) missing.push("add your friend's name");
+  if (r.collection === "friend" && !(await ownerDetails(db)).name) missing.push("add your own name (friend's page section), so your friend knows who to collect from");
   if (r.collection === "bank") {
     if (!bunq?.accountId) missing.push("connect bunq");
     if (!r.friendIban) missing.push("add your friend's IBAN");
