@@ -60,6 +60,7 @@ async function main() {
   const { arm, ensureRules, rulesFor, saveRules } = await import("../lib/rules");
   const { hashPassword } = await import("../lib/secrets");
   const { runSettlement, syncActivities } = await import("../lib/settle");
+  const { claimSick } = await import("../lib/sick");
   const { addDays, datesBetween, localDate, weekStart, weekdayOf } = await import("../lib/time");
   const { FakeBank, FakeStrava, at } = await import("../tests/fakes");
 
@@ -89,11 +90,15 @@ async function main() {
 
   // Days that get skipped, counted from the first Monday.
   const skipped = new Set([addDays(start, 9), addDays(start, 18), addDays(start, 19)].concat(today > addDays(thisMonday, 1) ? [addDays(thisMonday, 1)] : []));
+  // One sick day, on last week's Tuesday.
+  const sickDay = addDays(thisMonday, -6);
   let shot = 1;
 
   for (const day of datesBetween(start, addDays(today, -1))) {
     const kind = (await rulesFor(db, day))?.rules.schedule[weekdayOf(day)];
-    if (kind && !skipped.has(day)) {
+    if (kind && day === sickDay) {
+      await claimSick(db, at(day, "09:00"), day, true);
+    } else if (kind && !skipped.has(day)) {
       if (kind === "run") strava.run(day, 3.6 + ((shot * 37) % 50) / 10, "07:1" + (shot % 10));
       else if (shot % 3 === 0) strava.lift(day, 48, "18:30");
       else await saveProof(db, at(day, "19:40"), fakeScreenshot(shot));

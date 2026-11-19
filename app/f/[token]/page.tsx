@@ -44,6 +44,11 @@ async function Friend({ params }: { params: Promise<{ token: string }> }) {
         Every time {owner} skips a planned workout, a penalty lands on your account. Keep each one for {v.holdDays} days, then send it back. Do not
         send anything back early, however nicely you are asked.
       </p>
+      {v.sick.limit > 0 && (
+        <p className="mt-3 max-w-[60ch] text-sm leading-relaxed text-muted">
+          Sick days cost nothing. {v.sick.used} of {v.sick.limit} used in {v.sick.month}.
+        </p>
+      )}
 
       <dl className="mt-8 grid grid-cols-3 border-t border-line pt-6">
         <div className="flex flex-col gap-1 pr-3">

@@ -18,6 +18,9 @@ Read `README.md` for how it works and `AGENTS.md` for the Next.js version notes.
 - A judged day never changes. Rules are versioned by start date, so a rule change never rewrites history.
 - A transfer is never sent without first reading the bank's payment list and looking for its
   reference (`SHOWUP-YYYYMMDD`). That is what prevents paying twice.
+- A sick day is neutral: no charge, and the count of misses in a row is carried through it
+  unchanged (it neither grows nor resets). It can only be used until 03:00 the next morning,
+  proof of a done session wins over it, and the monthly limit lives in the versioned rules.
 - The friend's page shows money and uploaded screenshots only, never Strava data (Strava's API terms).
 - Strava activity details are deleted after 7 days (same terms).
 - No secrets, IBANs or personal data in the repository. Keys live encrypted in the database.

@@ -31,7 +31,7 @@ export interface Ports {
 export interface SettleReport {
   /** true when another run was already in progress and this one did nothing. */
   busy: boolean;
-  judged: { date: Ymd; kind: Kind; status: "done" | "missed"; chargeCents: number; practice: boolean }[];
+  judged: { date: Ymd; kind: Kind; status: "done" | "missed" | "sick"; chargeCents: number; practice: boolean }[];
   /** Days that are waiting for Strava to come back. */
   waiting: Ymd[];
   paid: { date: Ymd; cents: number }[];
@@ -143,10 +143,16 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
     const prev = await t.query<SessionRow>("SELECT date, practice, streak FROM sessions WHERE date < $1 ORDER BY date DESC LIMIT 1", [day]);
     // A streak never carries over between practice and real money.
     const prevStreak = prev.length && prev[0].practice === practice ? prev[0].streak : 0;
+    // A sick day (see sick.ts) only matters when the session was not done after all.
+    const claimed = (await t.query("SELECT 1 FROM sick_days WHERE session_date = $1", [day])).length > 0;
+    const status: "done" | "missed" | "sick" = ev.done ? "done" : claimed ? "sick" : "missed";
     let streak = 0;
     let raw = 0;
     let charge = 0;
-    if (!ev.done) {
+    if (status === "sick") {
+      // As if the day had not been planned: no charge, and the multiplier stays where it was.
+      streak = prevStreak;
+    } else if (status === "missed") {
       streak = prevStreak + 1;
       const week = await t.query<{ total: number }>(
         "SELECT COALESCE(SUM(charge_cents), 0)::int AS total FROM sessions WHERE date >= $1 AND date < $2 AND practice = $3",
@@ -159,8 +165,10 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
     const inserted = await t.query(
       `INSERT INTO sessions (date, kind, status, practice, source, activity_id, proof_id, streak, raw_cents, charge_cents, note, settled_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (date) DO NOTHING RETURNING date`,
-      [day, kind, ev.done ? "done" : "missed", practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now],
+      [day, kind, status, practice, ev.source, ev.activity?.id ?? null, ev.proofId, streak, raw, charge, note, now],
     );
+    // Trained anyway: the sick day goes back into the month's allowance.
+    if (inserted.length && status === "done" && claimed) await t.query("DELETE FROM sick_days WHERE session_date = $1", [day]);
     if (inserted.length && !practice && charge > 0) {
       await t.query(
         `INSERT INTO penalties (session_date, amount_cents, friend_iban, friend_name, hold_days, ref, created_at)
@@ -173,7 +181,7 @@ async function judgeDay(db: Db, day: Ymd, kind: Kind, rules: Rules, now: Date, n
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
       [JSON.stringify(day)],
     );
-    return { status: (ev.done ? "done" : "missed") as "done" | "missed", charge, practice, fresh: inserted.length > 0 };
+    return { status, charge, practice, fresh: inserted.length > 0, sickDayBack: status === "done" && claimed };
   });
 }
 
@@ -221,6 +229,7 @@ async function judge(db: Db, ports: Ports, now: Date, report: SettleReport): Pro
       if (res.status === "missed") {
         await logEvent(db, now, "miss", `${day}: missed ${kind}${res.practice ? " (practice)" : `, ${res.charge} cents`}`);
       }
+      if (res.sickDayBack) await logEvent(db, now, "sick", `${day}: ${kind} was done after all, sick day handed back`);
     }
   }
 }

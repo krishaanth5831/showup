@@ -1,8 +1,10 @@
 import { Warning } from "@phosphor-icons/react/dist/ssr";
 import Link from "next/link";
 import { Suspense } from "react";
+import { sickDayAction, undoSickDayAction } from "@/app/actions";
 import { Chip, DayDot, PageSkeleton, kindLabel } from "@/app/ui/bits";
 import { Countdown } from "@/app/ui/countdown";
+import { ActionButton } from "@/app/ui/forms";
 import { ProofUpload } from "@/app/ui/proof-upload";
 import { requireUser } from "@/lib/auth";
 import { euros, km } from "@/lib/engine";
@@ -64,6 +66,11 @@ async function Today() {
             </li>
           ))}
         </ol>
+        {d.sick.month.limit > 0 && (
+          <p className="mt-4 text-xs text-muted">
+            Sick days in {d.sick.month.name}: {d.sick.month.used} of {d.sick.month.limit} used.
+          </p>
+        )}
       </section>
 
       <dl className="grid grid-cols-3 border-t border-line pt-6">
@@ -105,6 +112,10 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
     d.mode === "armed" ? `Miss it and ${euros(t.costIfMissedCents)} goes to ${friend}.` : `In practice mode. A miss would cost ${euros(t.costIfMissedCents)}.`;
   // Just after midnight a screenshot can still count for yesterday's strength session.
   const lateUpload = t.uploadFor && t.uploadFor !== t.date ? t.uploadFor : null;
+  // Sick days: one for today, and until 03:00 one for yesterday if that day is still open.
+  const sickToday = d.sick.open.find((o) => o.date === t.date) ?? null;
+  const sickEarlier = d.sick.open.find((o) => o.date !== t.date && d.week.find((w) => w.date === o.date)?.state !== "done") ?? null;
+  const month = d.sick.month.name;
 
   return (
     <section className="rounded-[20px] border border-line bg-surface p-6">
@@ -137,6 +148,28 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
             </div>
           )}
         </div>
+      ) : t.state === "sick" ? (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center gap-4">
+            <DayDot state="sick" kind={t.kind} big />
+            <h1 className="text-4xl font-semibold tracking-tighter">Sick day</h1>
+          </div>
+          <p className="text-muted">
+            No {kindLabel(t.kind).toLowerCase()} today and nothing to pay. The multiplier stays where it was.{" "}
+            {t.kind === "run" ? "If you run anyway, the sick day comes back." : "If you train anyway and upload the screenshot, the sick day comes back."}
+          </p>
+          <p className="text-sm text-muted">
+            {d.sick.month.left} of {d.sick.month.limit} sick days left in {month}.
+          </p>
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+            {t.kind === "strength" && t.uploadFor === t.date && <ProofUpload label="Upload watch screenshot" replace={false} />}
+            {sickToday?.claimed && (
+              <ActionButton action={undoSickDayAction.bind(null, t.date)} variant="quiet">
+                Take the sick day back
+              </ActionButton>
+            )}
+          </div>
+        </div>
       ) : (
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-4">
@@ -155,6 +188,48 @@ function TodayCard({ t, d, friend }: { t: TodayView; d: Dashboard; friend: strin
             <p className="text-sm text-muted">Record it with Strava. It shows up here by itself a few minutes after it syncs.</p>
           ) : (
             t.uploadFor === t.date && <ProofUpload label="Upload watch screenshot" replace={false} />
+          )}
+          {sickToday && !sickToday.claimed && sickToday.limit > 0 && (
+            <div className="border-t border-line pt-4">
+              {sickToday.left > 0 ? (
+                <ActionButton
+                  action={sickDayAction.bind(null, t.date)}
+                  variant="quiet"
+                  confirm={`Use a sick day for today? No charge, and ${sickToday.left - 1} of ${sickToday.limit} will be left in ${month}.`}
+                >
+                  I&apos;m sick today ({sickToday.left} sick {sickToday.left === 1 ? "day" : "days"} left)
+                </ActionButton>
+              ) : (
+                <p className="text-sm text-muted">
+                  All {sickToday.limit} sick days for {month} are used.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {sickEarlier && (sickEarlier.claimed || (sickEarlier.limit > 0 && sickEarlier.left > 0)) && (
+        <div className="mt-6 flex flex-col gap-3 border-t border-line pt-6">
+          {sickEarlier.claimed ? (
+            <>
+              <p className="text-sm">Yesterday ({shortDate(sickEarlier.date)}) is marked as a sick day.</p>
+              <ActionButton action={undoSickDayAction.bind(null, sickEarlier.date)} variant="quiet">
+                Take the sick day back
+              </ActionButton>
+            </>
+          ) : (
+            <>
+              <p className="text-sm">
+                Yesterday&apos;s {kindLabel(sickEarlier.kind).toLowerCase()} ({shortDate(sickEarlier.date)}) is still open until 03:00.
+              </p>
+              <ActionButton
+                action={sickDayAction.bind(null, sickEarlier.date)}
+                variant="quiet"
+                confirm={`Use a sick day for yesterday? No charge, and ${sickEarlier.left - 1} of ${sickEarlier.limit} will be left.`}
+              >
+                I was sick yesterday
+              </ActionButton>
+            </>
           )}
         </div>
       )}

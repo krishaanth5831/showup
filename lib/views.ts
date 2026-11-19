@@ -7,11 +7,12 @@ import { kvGet, kvSet } from "./kv";
 import { proofTarget } from "./proofs";
 import { type RuleState, describeChanges, ruleState, rulesFor } from "./rules";
 import { activitiesOn, evidenceFor } from "./settle";
+import { type SickState, sickDaysUsed, sickState } from "./sick";
 import { loadStrava, stravaLinked } from "./strava";
 import { randomToken } from "./secrets";
-import { type Ymd, addDays, datesBetween, localDate, weekStart, weekdayOf, zonedToUtc } from "./time";
+import { type Ymd, addDays, datesBetween, localDate, monthName, weekStart, weekdayOf, zonedToUtc } from "./time";
 
-export type DayState = "done" | "missed" | "due" | "checking" | "upcoming" | "rest";
+export type DayState = "done" | "missed" | "sick" | "due" | "checking" | "upcoming" | "rest";
 
 export interface DayView {
   date: Ymd;
@@ -57,13 +58,15 @@ export interface Dashboard {
   heldCents: number;
   owedCents: number;
   friendName: string;
+  /** Sick days: what is left this month and which open days one can be used for. */
+  sick: SickState;
   alerts: Alert[];
 }
 
 interface SessionRow {
   date: string;
   kind: Kind;
-  status: "done" | "missed";
+  status: "done" | "missed" | "sick";
   practice: boolean;
   source: "strava" | "proof" | null;
   activity_id: string | null;
@@ -120,6 +123,11 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
     (await db.query<SessionRow>("SELECT * FROM sessions WHERE date >= $1 AND date <= $2", [monday, days[6]])).map((s) => [s.date, s]),
   );
   const acts = await activitiesOn(db, monday, today);
+  const sickDates = new Set(
+    (await db.query<{ session_date: string }>("SELECT session_date FROM sick_days WHERE session_date >= $1 AND session_date <= $2", [monday, days[6]])).map(
+      (r) => r.session_date,
+    ),
+  );
 
   const week: DayView[] = [];
   let todayView: TodayView | null = null;
@@ -140,7 +148,8 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
       dayState = "upcoming";
     } else if (kind) {
       const ev = await evidenceFor(db, d, kind, r, acts);
-      dayState = ev.done ? "done" : d === today ? "due" : "checking";
+      // Proof wins over a sick day: training anyway hands the sick day back.
+      dayState = ev.done ? "done" : sickDates.has(d) ? "sick" : d === today ? "due" : "checking";
       source = ev.source;
       activity = ev.activity;
       proofId = ev.proofId;
@@ -190,6 +199,7 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
     heldCents: t.heldCents,
     owedCents: t.owedCents,
     friendName: rules.friendName,
+    sick: await sickState(db, now, stravaLinked(await loadStrava(db))),
     alerts: await alerts(db, state, t),
   };
 }
@@ -243,7 +253,7 @@ function formatEuro(cents: number): string {
 export interface HistoryRow {
   date: Ymd;
   kind: Kind;
-  status: "done" | "missed";
+  status: "done" | "missed" | "sick";
   practice: boolean;
   source: "strava" | "proof" | null;
   proofId: number | null;
@@ -359,6 +369,8 @@ export interface FriendView {
   returnedCents: number;
   transfers: FriendTransfer[];
   proofs: { id: number; date: Ymd }[];
+  /** Sick days used in the current month, for the friend to keep an eye on. */
+  sick: { month: string; used: number; limit: number };
 }
 
 export async function friendToken(db: Db): Promise<string> {
@@ -404,6 +416,7 @@ export async function friendView(db: Db, now: Date): Promise<FriendView> {
     returnedCents: t.returnedCents,
     transfers,
     proofs: proofs.map((p) => ({ id: p.id, date: p.session_date })),
+    sick: { month: monthName(today), used: await sickDaysUsed(db, today), limit: rules.sickDaysPerMonth },
   };
 }
 

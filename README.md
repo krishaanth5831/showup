@@ -31,6 +31,11 @@ still counts. A screenshot can be uploaded until 03:00 as well.
 A week (Monday to Sunday) never costs more than €150. A completed session sets the count
 back to one. All of these numbers can be changed in Settings.
 
+**Sick days.** Three training days per calendar month can be marked as sick. A sick day
+costs nothing and leaves the count of misses in a row where it was, as if the day had not
+been planned. It is used on the day itself (until 03:00 the next morning), and it comes
+back if you train anyway. Your friend can see how many you have used.
+
 **The money.** Each penalty is its own bank transfer to your friend, with a reference like
 `SHOWUP-20261123`. Your friend gets a private link showing what they hold and when each
 transfer is due back (14 days by default). When they send money back with "showup" in the
@@ -86,8 +91,11 @@ It is set up for Vercel:
 
 Opening the app also runs any check that is overdue, so a missed nightly run is caught up.
 
-On your own computer no setup is needed: the database lives in `./.data`. The nightly check
-then only runs while the app is running and you open it (or press "Check now").
+On your own computer no setup is needed: `npm run dev` starts the app on
+http://localhost:3000 and the database lives in `./.data`. A phone on the same Wi-Fi can
+open it through the computer's network address, which `npm run dev` prints as "Network".
+The app only works while that command is running, and the nightly check then happens
+when you open the app (or press "Check now").
 
 ## Safety
 
@@ -101,7 +109,7 @@ then only runs while the app is running and you open it (or press "Check now").
 
 - It cannot stop your friend from sending the money back early. Pick a strict friend.
 - It does not judge what is on a screenshot. Your friend can see every screenshot on their page.
-- There are no sick days. A miss is a miss.
+- It does not ask for proof that you are sick. Three sick days a month is the whole allowance, and a fourth is a miss.
 - It does not move the money on to an investment account. Brokers generally refuse deposits
   that come from someone else's bank account, so your friend sends the money back to you and
   the app marks it as returned. Putting it into your investments from there is up to you.

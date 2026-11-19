@@ -6,7 +6,9 @@ import { kvGet, kvSet } from "../lib/kv";
 import { ProofError, proofTarget, saveProof } from "../lib/proofs";
 import { LOCK_DAYS, RuleError, arm, cancelPending, disarm, ensureRules, ruleState, rulesFor, saveRules } from "../lib/rules";
 import { activitiesOn, penaltyRef, runSettlement, settlementDue } from "../lib/settle";
+import { SickError, claimSick, sickDaysUsed, sickState, unclaimSick } from "../lib/sick";
 import { type Ymd, addDays, datesBetween } from "../lib/time";
+import { dashboard, history } from "../lib/views";
 import { FakeBank, FakeStrava, at } from "./fakes";
 
 process.env.APP_SECRET = "test-secret-that-is-long-enough-0123456789";
@@ -26,7 +28,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await db.exec(
-    "TRUNCATE kv, locks, rules, activities, proofs, penalties, sessions, incoming, events RESTART IDENTITY CASCADE",
+    "TRUNCATE kv, locks, rules, activities, proofs, penalties, sessions, incoming, events, sick_days RESTART IDENTITY CASCADE",
   );
   strava = new FakeStrava();
   bank = new FakeBank();
@@ -625,5 +627,158 @@ describe("test money and real money", () => {
     await applyBankSwitch(db, at("2026-11-22", "12:00"), "production", { kind: "fine" });
     expect((await planBankSwitch(db, "2026-11-22", "production")).kind).toBe("fine");
     expect((await planBankSwitch(db, "2026-11-22", "sandbox")).kind).toBe("fine");
+  });
+});
+
+describe("sick days", () => {
+  /** Uses a sick day for a day, at 09:00 on that day unless another moment is given. */
+  const sick = (day: Ymd, when: Date = at(day, "09:00")) => claimSick(db, when, day, true);
+
+  it("cost nothing and leave the multiplier where it was: miss, sick, miss is 10, 0, 20", async () => {
+    await armed();
+    await nightly("2026-11-23", "2026-11-23"); // Monday missed
+    await sick("2026-11-24");
+    await nightly("2026-11-24", "2026-11-25"); // Tuesday sick, Wednesday missed
+
+    expect((await sessions()).map((s) => [s.date, s.status, s.streak, s.charge_cents])).toEqual([
+      ["2026-11-23", "missed", 1, 1000],
+      ["2026-11-24", "sick", 1, 0],
+      ["2026-11-25", "missed", 2, 2000],
+    ]);
+    expect((await penalties()).map((p) => [p.session_date, p.amount_cents])).toEqual([
+      ["2026-11-23", 1000],
+      ["2026-11-25", 2000],
+    ]);
+  });
+
+  it("do not count as a completed session either: the next miss after a clean run of days still costs 10", async () => {
+    await armed();
+    strava.run("2026-11-23", 5);
+    await sick("2026-11-24");
+    await nightly("2026-11-23", "2026-11-25"); // done, sick, missed
+    expect((await sessions()).map((s) => [s.status, s.streak, s.charge_cents])).toEqual([
+      ["done", 0, 0],
+      ["sick", 0, 0],
+      ["missed", 1, 1000],
+    ]);
+  });
+
+  it("are limited to three per calendar month, and a new month starts fresh", async () => {
+    await armed();
+    await sick("2026-11-23");
+    await sick("2026-11-24");
+    const third = await sick("2026-11-25");
+    expect([third.left, third.limit]).toEqual([0, 3]);
+    await expect(sick("2026-11-27")).rejects.toThrow("All 3 sick days for November are used");
+    expect(await sickDaysUsed(db, "2026-11-27")).toBe(3);
+
+    await nightly("2026-11-23", "2026-11-30");
+    // Friday 27 and Saturday 28 could not be covered, so they are ordinary misses.
+    expect((await sessions()).map((s) => s.status)).toEqual(["sick", "sick", "sick", "missed", "missed", "missed"]);
+
+    const december = await sick("2026-12-01");
+    expect([december.left, december.limit]).toEqual([2, 3]);
+  });
+
+  it("are handed back when the session is done after all", async () => {
+    await armed();
+    await sick("2026-11-23"); // run day
+    strava.run("2026-11-23", 4.2, "19:00");
+    await sick("2026-11-24"); // strength day
+    await saveProof(db, at("2026-11-24", "20:00"), jpeg(1));
+    expect(await sickDaysUsed(db, "2026-11-24")).toBe(2);
+
+    await nightly("2026-11-23", "2026-11-24");
+    expect((await sessions()).map((s) => [s.status, s.source])).toEqual([
+      ["done", "strava"],
+      ["done", "proof"],
+    ]);
+    expect(await sickDaysUsed(db, "2026-11-24")).toBe(0);
+    expect(await penalties()).toEqual([]);
+  });
+
+  it("can be used until 03:00 the next morning, and not a minute later even when judging runs late", async () => {
+    await armed();
+    const late = await sick("2026-11-23", at("2026-11-24", "02:30"));
+    expect(late.claimed).toBe(true);
+
+    // Tuesday is not judged yet at 03:10 on Wednesday, but its window is closed.
+    await expect(sick("2026-11-24", at("2026-11-25", "03:10"))).rejects.toThrow("until 03:00");
+    await nightly("2026-11-23", "2026-11-24");
+    expect((await sessions()).map((s) => s.status)).toEqual(["sick", "missed"]);
+    // And never for a day that has been judged.
+    await expect(sick("2026-11-24", at("2026-11-25", "09:00"))).rejects.toBeInstanceOf(SickError);
+  });
+
+  it("only exist for today's training day: not for rest days, later days, or twice", async () => {
+    await armed();
+    await expect(sick("2026-11-26")).rejects.toThrow("training day"); // Thursday is a rest day
+    await expect(sick("2026-11-27", at("2026-11-25", "09:00"))).rejects.toThrow("training day"); // not yet
+    await expect(claimSick(db, at("2026-11-23", "09:00"), "yesterday", true)).rejects.toThrow("not a day");
+    await sick("2026-11-23");
+    await expect(sick("2026-11-23")).rejects.toThrow("already a sick day");
+    expect(await sickDaysUsed(db, "2026-11-23")).toBe(1);
+  });
+
+  it("can be taken back until the day is judged, and then the miss counts", async () => {
+    await armed();
+    await sick("2026-11-23");
+    await unclaimSick(db, at("2026-11-23", "21:00"), "2026-11-23", true);
+    expect(await sickDaysUsed(db, "2026-11-23")).toBe(0);
+    await nightly("2026-11-23", "2026-11-23");
+    expect((await session("2026-11-23")).status).toBe("missed");
+    expect((await penalties()).map((p) => p.amount_cents)).toEqual([1000]);
+
+    await sick("2026-11-24");
+    await nightly("2026-11-24", "2026-11-24");
+    await expect(unclaimSick(db, at("2026-11-25", "09:00"), "2026-11-24", true)).rejects.toThrow("can't be taken back");
+    expect((await session("2026-11-24")).status).toBe("sick");
+  });
+
+  it("work in practice mode, but are not offered while no day is judged at all", async () => {
+    await practice();
+    // Practice without Strava: nothing is judged, so a sick day would be used up for nothing.
+    await expect(claimSick(db, at("2026-11-23", "09:00"), "2026-11-23", false)).rejects.toThrow("training day");
+    expect((await sickState(db, at("2026-11-23", "09:00"), false)).open).toEqual([]);
+
+    await sick("2026-11-23");
+    await nightly("2026-11-23", "2026-11-23");
+    const s = await session("2026-11-23");
+    expect([s.status, s.practice, s.charge_cents]).toEqual(["sick", true, 0]);
+  });
+
+  it("follow the rules: 0 switches them off, and a lower number applies a week later once armed", async () => {
+    await armed({ sickDaysPerMonth: 0 });
+    await expect(sick("2026-11-23")).rejects.toThrow("switched off");
+
+    const current = (await ruleState(db, "2026-11-23")).current.rules;
+    const res = await saveRules(db, "2026-11-23", { ...current, sickDaysPerMonth: 5 });
+    expect(res.delayed).toBe(true);
+    await expect(sick("2026-11-24")).rejects.toThrow("switched off");
+    const later = await sick("2026-11-30"); // the change is in force from Monday 30 November
+    expect(later.limit).toBe(5);
+    await expect(saveRules(db, "2026-11-30", { ...current, sickDaysPerMonth: 2.5 })).rejects.toThrow("Sick days per month");
+  });
+
+  it("show up on the screens as a sick day, not as a miss in a row", async () => {
+    await armed();
+    await nightly("2026-11-23", "2026-11-23"); // Monday missed
+    await sick("2026-11-24");
+
+    const open = await dashboard(db, at("2026-11-24", "12:00"));
+    expect(open.today.state).toBe("sick");
+    expect(open.sick.month).toEqual({ name: "November", used: 1, limit: 3, left: 2 });
+    expect(open.sick.open.map((o) => [o.date, o.claimed])).toEqual([["2026-11-24", true]]);
+    expect(open.nextMissCents).toBe(2000); // Monday's miss still counts
+
+    await nightly("2026-11-24", "2026-11-24");
+    const after = await dashboard(db, at("2026-11-25", "12:00"));
+    expect(after.week.slice(0, 3).map((d) => d.state)).toEqual(["missed", "sick", "due"]);
+    expect(after.nextMissCents).toBe(2000);
+    const rows = (await history(db, at("2026-11-25", "12:00"))).weeks[0].rows;
+    expect(rows.map((r) => [r.date, r.status, r.chargeCents])).toEqual([
+      ["2026-11-24", "sick", 0],
+      ["2026-11-23", "missed", 1000],
+    ]);
   });
 });

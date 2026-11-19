@@ -113,4 +113,13 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX events_at ON events (at DESC);
   `,
+
+  // 2: sick days. One row per training day marked as sick. A row is removed again when the
+  // claim is taken back, or when the session turns out to be done after all.
+  `
+  CREATE TABLE sick_days (
+    session_date TEXT PRIMARY KEY,
+    claimed_at TIMESTAMPTZ NOT NULL
+  );
+  `,
 ];

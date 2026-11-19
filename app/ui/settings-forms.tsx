@@ -82,6 +82,17 @@ export function RulesForm({ rules, locked, lockDays }: { rules: Rules; locked: b
         </div>
       </fieldset>
 
+      <fieldset>
+        <legend className="mb-4 text-sm font-medium">Sick days</legend>
+        <div className="grid grid-cols-2 gap-4">
+          <Field label="Sick days per month" name="sickDays" inputMode="numeric" defaultValue={rules.sickDaysPerMonth} required />
+        </div>
+        <p className="mt-2 text-sm leading-snug text-muted">
+          A sick day costs nothing and leaves the multiplier where it was. It is used on the training day itself, and it comes back if you train
+          anyway. Enter 0 to switch sick days off.
+        </p>
+      </fieldset>
+
       <div className="flex flex-col gap-3">
         {locked && (
           <p className="text-sm leading-snug text-muted">

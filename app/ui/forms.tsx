@@ -60,7 +60,8 @@ export function ActionButton({
         <div className="flex flex-col gap-3">
           <p className="text-sm leading-snug">{confirm}</p>
           <div className="flex flex-wrap gap-2">
-            <Submit variant={variant} busy={busy}>
+            {/* A text-style button asks its question with a real button, so "yes" is easy to hit. */}
+            <Submit variant={variant === "quiet" ? "solid" : variant} busy={busy}>
               Yes, do it
             </Submit>
             <button type="button" onClick={() => setAsking(false)} className={buttonClass("outline")}>

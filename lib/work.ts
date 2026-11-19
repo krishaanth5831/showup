@@ -50,7 +50,8 @@ export function summarize(r: SettleReport): string {
   if (r.busy) return "A check is already running.";
   const parts: string[] = [];
   const misses = r.judged.filter((j) => j.status === "missed").length;
-  if (r.judged.length) parts.push(`${r.judged.length} day${r.judged.length === 1 ? "" : "s"} judged, ${misses} missed`);
+  const sick = r.judged.filter((j) => j.status === "sick").length;
+  if (r.judged.length) parts.push(`${r.judged.length} day${r.judged.length === 1 ? "" : "s"} judged, ${misses} missed${sick ? `, ${sick} sick` : ""}`);
   if (r.paid.length) parts.push(`${r.paid.length} transfer${r.paid.length === 1 ? "" : "s"} sent`);
   if (r.waiting.length) parts.push("waiting for Strava");
   if (r.payProblems.length) parts.push(r.payProblems[0]);

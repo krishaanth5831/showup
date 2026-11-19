@@ -16,6 +16,7 @@ export default function HistoryPage() {
 }
 
 function moneyLine(row: HistoryRow): string | null {
+  if (row.status === "sick") return "Sick day. No charge, and the multiplier stays where it was.";
   if (row.status !== "missed") return null;
   if (row.practice) return `Practice. Would have cost ${euros(row.chargeCents)}.`;
   if (!row.penalty) return row.rawCents > 0 ? "Weekly cap reached, so nothing was charged." : null;
@@ -77,7 +78,13 @@ async function HistoryContent() {
                       <span className="font-normal text-muted">
                         {" "}
                         {kindLabel(row.kind)}
-                        {row.status === "done" ? (row.source === "proof" ? ", screenshot" : ", Strava") : row.streak > 1 ? `, miss ${row.streak} in a row` : ""}
+                        {row.status === "done"
+                          ? row.source === "proof"
+                            ? ", screenshot"
+                            : ", Strava"
+                          : row.status === "missed" && row.streak > 1
+                            ? `, miss ${row.streak} in a row`
+                            : ""}
                       </span>
                     </p>
                     {line && <p className="text-sm leading-snug text-muted">{line}</p>}

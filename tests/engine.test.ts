@@ -162,6 +162,10 @@ describe("rule validation", () => {
     expect(validateRules({ ...R, capPerWeekCents: 1000 })).toHaveLength(1);
     expect(validateRules({ ...R, schedule: {} })).toHaveLength(1);
     expect(validateRules({ ...R, friendIban: "NL00NOPE" })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 0 })).toEqual([]);
+    expect(validateRules({ ...R, sickDaysPerMonth: -1 })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 1.5 })).toHaveLength(1);
+    expect(validateRules({ ...R, sickDaysPerMonth: 11 })).toHaveLength(1);
   });
 });
 

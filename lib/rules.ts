@@ -156,6 +156,7 @@ const FIELD_LABELS: Record<string, string> = {
   capPerMissCents: "cap per miss",
   capPerWeekCents: "weekly cap",
   holdDays: "hold time",
+  sickDaysPerMonth: "number of sick days",
   friendName: "friend's name",
   friendIban: "friend's IBAN",
 };

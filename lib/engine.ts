@@ -24,6 +24,8 @@ export interface Rules {
   capPerWeekCents: number;
   /** How long the friend holds each transfer. */
   holdDays: number;
+  /** Training days per calendar month that can be marked as sick: no charge, multiplier untouched. */
+  sickDaysPerMonth: number;
   friendName: string;
   friendIban: string;
 }
@@ -38,6 +40,7 @@ export const DEFAULT_RULES: Rules = {
   capPerMissCents: 8000,
   capPerWeekCents: 15000,
   holdDays: 14,
+  sickDaysPerMonth: 3,
   friendName: "",
   friendIban: "",
 };
@@ -205,6 +208,8 @@ export function validateRules(r: Rules): string[] {
     problems.push("The weekly cap can't be lower than the cap per miss.");
   if (r.capPerWeekCents > 100_000) problems.push("The weekly cap can't be above €1000.");
   if (!Number.isInteger(r.holdDays) || r.holdDays < 1 || r.holdDays > 365) problems.push("Hold time must be 1 to 365 days.");
+  if (!Number.isInteger(r.sickDaysPerMonth) || r.sickDaysPerMonth < 0 || r.sickDaysPerMonth > 10)
+    problems.push("Sick days per month must be a whole number from 0 to 10.");
   if (r.friendIban && !isValidIban(r.friendIban)) problems.push("The friend's IBAN is not a valid IBAN.");
   return problems;
 }

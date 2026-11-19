@@ -12,9 +12,10 @@ import { BankError, StravaError } from "@/lib/ports";
 import { ProofError, saveProof } from "@/lib/proofs";
 import { RuleError, arm, cancelPending, disarm, ruleState, saveRules } from "@/lib/rules";
 import { allocateReturns, runSettlement } from "@/lib/settle";
+import { SickError, claimSick, unclaimSick } from "@/lib/sick";
 import { randomToken } from "@/lib/secrets";
-import { loadStrava, saveStrava } from "@/lib/strava";
-import { WEEKDAYS, localDate, longDate, shortDate } from "@/lib/time";
+import { loadStrava, saveStrava, stravaLinked } from "@/lib/strava";
+import { WEEKDAYS, localDate, longDate, monthName, shortDate } from "@/lib/time";
 import { realPorts, summarize } from "@/lib/work";
 
 export interface FormState {
@@ -24,7 +25,7 @@ export interface FormState {
 
 /** Turns anything thrown into a message a person can act on. */
 function fail(e: unknown): FormState {
-  if (e instanceof RuleError || e instanceof ProofError || e instanceof BankError || e instanceof StravaError) {
+  if (e instanceof RuleError || e instanceof ProofError || e instanceof SickError || e instanceof BankError || e instanceof StravaError) {
     return { error: e.message };
   }
   console.error(e);
@@ -62,6 +63,29 @@ export async function uploadProofAction(_prev: FormState, form: FormData): Promi
     const saved = await saveProof(db, new Date(), new Uint8Array(await file.arrayBuffer()));
     refresh();
     return { ok: `Saved for ${shortDate(saved.date)}.` };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+/** Marks a training day as a sick day. The day comes from the button, and is checked again on the server. */
+export async function sickDayAction(day: string, _prev: FormState): Promise<FormState> {
+  const db = await requireUser();
+  try {
+    const used = await claimSick(db, new Date(), day, stravaLinked(await loadStrava(db)));
+    refresh();
+    return { ok: `Sick day used for ${shortDate(used.date)}. ${used.left} of ${used.limit} left in ${monthName(used.date)}.` };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function undoSickDayAction(day: string, _prev: FormState): Promise<FormState> {
+  const db = await requireUser();
+  try {
+    await unclaimSick(db, new Date(), day, stravaLinked(await loadStrava(db)));
+    refresh();
+    return { ok: "Sick day taken back." };
   } catch (e) {
     return fail(e);
   }
@@ -202,6 +226,8 @@ export async function saveRulesAction(_prev: FormState, form: FormData): Promise
       capPerMissCents: euro(form, "capMiss"),
       capPerWeekCents: euro(form, "capWeek"),
       holdDays: Math.round(num(form, "holdDays")),
+      // A page that was open before this field existed sends nothing: keep the current value then.
+      sickDaysPerMonth: form.has("sickDays") ? Math.round(num(form, "sickDays")) : current.sickDaysPerMonth,
       friendName: String(form.get("friendName") ?? ""),
       friendIban,
     });
