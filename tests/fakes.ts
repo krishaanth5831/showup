@@ -1,8 +1,18 @@
-// Stand-ins for Strava and the bank, used by the tests and by the demo data script.
-// The fake bank can be told to fail in the ways a real one does.
+// Stand-ins for Strava, the bank and the photo check, used by the tests and by the demo
+// data script. The fakes can be told to fail in the ways the real services do.
 
-import type { Activity } from "../lib/engine";
-import { BankError, type BankPayment, type BankPort, type PayRequest, StravaError, type StravaPort } from "../lib/ports";
+import type { Activity, PhotoReading } from "../lib/engine";
+import {
+  BankError,
+  type BankPayment,
+  type BankPort,
+  type PayRequest,
+  PhotoCheckError,
+  type PhotoCheckInput,
+  type PhotoCheckPort,
+  StravaError,
+  type StravaPort,
+} from "../lib/ports";
 import { type Ymd, zonedToUtc } from "../lib/time";
 
 /** The instant of a local Amsterdam wall-clock time. */
@@ -127,5 +137,43 @@ export class FakeBank implements BankPort {
 
   get sentTotal(): number {
     return -this.sent.reduce((s, p) => s + p.amountCents, 0);
+  }
+}
+
+/**
+ * Reads every photo as a good workout of the kind that was due, on the day it was due,
+ * unless told otherwise: `show` overrides what the next photos "show", `down` and
+ * `failWith` make it fail like the real service.
+ */
+export class FakePhotoCheck implements PhotoCheckPort {
+  linked = true;
+  down = false;
+  failWith: PhotoCheckError | null = null;
+  show: Partial<PhotoReading> | ((input: PhotoCheckInput) => Partial<PhotoReading>) = {};
+  calls: PhotoCheckInput[] = [];
+
+  async ready(): Promise<boolean> {
+    return this.linked;
+  }
+
+  async read(input: PhotoCheckInput): Promise<PhotoReading> {
+    this.calls.push(input);
+    if (this.down) throw new PhotoCheckError("No answer from Claude.", "unavailable");
+    if (this.failWith) throw this.failWith;
+    const over = typeof this.show === "function" ? this.show(input) : this.show;
+    // Different figures for every photo, so the same-figures rule only fires when a test wants it.
+    const n = this.calls.length;
+    return {
+      isWorkoutRecord: true,
+      activity: input.kind,
+      dateShown: input.day,
+      startTime: "18:00",
+      distanceKm: input.kind === "run" ? 5 + n / 100 : null,
+      durationS: 1800 + n * 7,
+      calories: 300 + n,
+      sameAsDay: null,
+      summary: input.kind === "run" ? `Run, ${(5 + n / 100).toFixed(2)} km` : "Strength workout, 30 min",
+      ...over,
+    };
   }
 }

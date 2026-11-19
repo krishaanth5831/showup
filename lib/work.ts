@@ -2,18 +2,26 @@
 // "keep things fresh while someone is looking" step that runs when the app is opened.
 
 import { BunqBank } from "./bunq";
+import { ClaudePhotoCheck, loadClaude } from "./claude";
 import type { Db } from "./db";
 import { kvGet, kvSet } from "./kv";
+import { recheckWaiting } from "./proofs";
 import { type Ports, type SettleReport, runSettlement, settlementDue, syncActivities } from "./settle";
-import { StravaClient } from "./strava";
+import { StravaClient, loadStrava, stravaLinked } from "./strava";
 import { type Ymd, addDays, localDate } from "./time";
 
 export function realPorts(db: Db): Ports {
-  return { strava: new StravaClient(db), bank: new BunqBank(db) };
+  return { strava: new StravaClient(db), bank: new BunqBank(db), photos: new ClaudePhotoCheck(db) };
+}
+
+/** true when something can check a session: the photo check, or Strava. */
+export async function checksOn(db: Db): Promise<boolean> {
+  return !!(await loadClaude(db))?.apiKey || stravaLinked(await loadStrava(db));
 }
 
 const RUN_EVERY_MS = 10 * 60_000;
 const SYNC_EVERY_MS = 3 * 60_000;
+const PHOTO_RETRY_MS = 2 * 60_000;
 
 /**
  * Called when the Today screen is opened. If the nightly job is behind (the scheduler
@@ -29,6 +37,15 @@ export async function freshen(db: Db, now: Date): Promise<void> {
       return;
     }
     const ports = realPorts(db);
+    // A photo that could not be checked at upload is tried again now and then.
+    const retry = await kvGet<string>(db, "photo_retry_at");
+    if (!retry || now.getTime() - new Date(retry).getTime() > PHOTO_RETRY_MS) {
+      const waiting = await db.query("SELECT 1 FROM proofs WHERE check_status = 'waiting' LIMIT 1");
+      if (waiting.length) {
+        await kvSet(db, "photo_retry_at", now.toISOString());
+        await recheckWaiting(db, ports.photos, now);
+      }
+    }
     if (!(await ports.strava.connected())) return;
     const sync = await kvGet<{ at: string }>(db, "strava_sync");
     const syncAge = sync ? now.getTime() - new Date(sync.at).getTime() : Infinity;
@@ -53,7 +70,7 @@ export function summarize(r: SettleReport): string {
   const sick = r.judged.filter((j) => j.status === "sick").length;
   if (r.judged.length) parts.push(`${r.judged.length} day${r.judged.length === 1 ? "" : "s"} judged, ${misses} missed${sick ? `, ${sick} sick` : ""}`);
   if (r.paid.length) parts.push(`${r.paid.length} transfer${r.paid.length === 1 ? "" : "s"} sent`);
-  if (r.waiting.length) parts.push("waiting for Strava");
+  if (r.waiting.length) parts.push(r.waitingFor === "photo" ? "waiting for a photo to be checked" : "waiting for Strava");
   if (r.payProblems.length) parts.push(r.payProblems[0]);
   if (r.notes.length) parts.push(r.notes[0]);
   return parts.length ? `${parts.join(". ")}.` : "Everything is up to date.";

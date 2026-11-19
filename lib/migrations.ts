@@ -122,4 +122,18 @@ export const MIGRATIONS: string[] = [
     claimed_at TIMESTAMPTZ NOT NULL
   );
   `,
+
+  // 3: photo proof for every kind of session, read by Claude. Photos from before this
+  // were strength screenshots that counted without a check, so they keep counting.
+  //   check_status: accepted  = Claude read it and it passed the rules
+  //                 waiting   = Claude could not be reached yet; checked again later
+  //                 unchecked = Claude stayed unreachable too long, so it counts without a check
+  // A photo that fails the check is not stored at all.
+  `
+  ALTER TABLE proofs ADD COLUMN kind TEXT NOT NULL DEFAULT 'strength';
+  ALTER TABLE proofs ADD COLUMN check_status TEXT NOT NULL DEFAULT 'accepted';
+  ALTER TABLE proofs ADD COLUMN reading JSONB;
+  ALTER TABLE proofs ADD COLUMN checked_at TIMESTAMPTZ;
+  ALTER TABLE proofs ADD COLUMN check_error TEXT;
+  `,
 ];

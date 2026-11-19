@@ -1,5 +1,5 @@
 // The nightly job, in four steps:
-//   1. judge   - every scheduled day whose deadline has passed gets a verdict: done or missed
+//   1. judge   - every scheduled day whose deadline has passed gets a verdict: done, missed or sick
 //   2. pay     - every unpaid penalty is sent to the friend
 //   3. returns - money the friend sent back is matched against what he holds
 //   4. tidy    - old Strava details are thrown away
@@ -10,12 +10,15 @@
 import type { Db } from "./db";
 import { type Activity, type Kind, type Rules, chargeFor, isValidIban, normalizeIban, qualifyingActivity } from "./engine";
 import { acquireLock, kvGet, kvSet, logEvent, releaseLock } from "./kv";
-import { BankError, type BankPayment, type BankPort, type StravaPort } from "./ports";
+import { BankError, type BankPayment, type BankPort, type PhotoCheckPort, type StravaPort } from "./ports";
+import { markUnchecked, proofOn, recheckWaiting } from "./proofs";
 import { ensureRules, rulesFor } from "./rules";
 import { type Ymd, addDays, datesBetween, lastSettleableDay, localDate, settleAfter, weekStart, weekdayOf, zonedToUtc } from "./time";
 
 /** If Strava can't be reached, a day waits this long for it before being judged anyway. */
 export const STRAVA_WAIT_HOURS = 72;
+/** A photo Claude could not check yet holds its day this long; after that it counts unchecked. */
+export const PHOTO_WAIT_HOURS = 72;
 /** Strava's terms allow keeping activity details for at most 7 days. */
 export const ACTIVITY_KEEP_DAYS = 7;
 /** A payment we never got an answer for is looked up in the bank; after this long without a trace it is retried. */
@@ -26,14 +29,16 @@ export const HARD_MAX_CENTS = 50_000;
 export interface Ports {
   strava: StravaPort;
   bank: BankPort;
+  photos: PhotoCheckPort;
 }
 
 export interface SettleReport {
   /** true when another run was already in progress and this one did nothing. */
   busy: boolean;
   judged: { date: Ymd; kind: Kind; status: "done" | "missed" | "sick"; chargeCents: number; practice: boolean }[];
-  /** Days that are waiting for Strava to come back. */
+  /** Days that are waiting for Strava or for a photo check to come back. */
   waiting: Ymd[];
+  waitingFor: "strava" | "photo" | null;
   paid: { date: Ymd; cents: number }[];
   payProblems: string[];
   returnedCents: number;
@@ -110,18 +115,22 @@ export interface Evidence {
   source: "strava" | "proof" | null;
   activity: Activity | null;
   proofId: number | null;
+  /** A photo was sent in but Claude has not been able to check it yet. */
+  waiting: boolean;
+  /** What Claude read from the photo, in one line. */
+  photoSummary: string | null;
 }
 
 /** What currently proves (or fails to prove) a day's session. */
 export async function evidenceFor(db: Db, day: Ymd, kind: Kind, rules: Rules, acts?: Activity[]): Promise<Evidence> {
   const list = acts ?? (await activitiesOn(db, day));
   const activity = qualifyingActivity(list, day, kind, rules);
-  if (activity) return { done: true, source: "strava", activity, proofId: null };
-  if (kind === "strength") {
-    const proof = await db.query<{ id: number }>("SELECT id FROM proofs WHERE session_date = $1", [day]);
-    if (proof.length) return { done: true, source: "proof", activity: null, proofId: proof[0].id };
+  if (activity) return { done: true, source: "strava", activity, proofId: null, waiting: false, photoSummary: null };
+  const proof = await proofOn(db, day, kind);
+  if (proof && proof.status !== "waiting") {
+    return { done: true, source: "proof", activity: null, proofId: proof.id, waiting: false, photoSummary: proof.summary };
   }
-  return { done: false, source: null, activity: null, proofId: null };
+  return { done: false, source: null, activity: null, proofId: proof?.id ?? null, waiting: !!proof, photoSummary: null };
 }
 
 // ---------- step 1: judge ----------
@@ -193,6 +202,9 @@ async function judge(db: Db, ports: Ports, now: Date, report: SettleReport): Pro
 
   const first = addDays(cursor, 1);
   const stravaOn = await ports.strava.connected();
+  const photosOn = await ports.photos.ready();
+  // Photos that could not be checked at upload get another try before their day is judged.
+  await recheckWaiting(db, ports.photos, now);
   let synced = false;
   if (stravaOn) {
     try {
@@ -208,21 +220,36 @@ async function judge(db: Db, ports: Ports, now: Date, report: SettleReport): Pro
   for (const day of datesBetween(first, last)) {
     const version = await rulesFor(db, day);
     const kind = version?.rules.schedule[weekdayOf(day)];
-    // Rest days, and practice days without Strava (nothing to check a run against), are skipped.
-    if (!version || !kind || (!version.rules.armed && !stravaOn)) {
+    // Rest days are skipped, and so are practice days while nothing can check a session
+    // (no photo check and no Strava): there would be no way to prove anything.
+    if (!version || !kind || (!version.rules.armed && !stravaOn && !photosOn)) {
       await kvSet(db, "cursor", day);
       continue;
     }
-    let note: string | null = null;
-    if (!synced) {
-      const giveUpAt = settleAfter(day).getTime() + STRAVA_WAIT_HOURS * 3_600_000;
-      if (now.getTime() < giveUpAt) {
+    const notes: string[] = [];
+    const giveUpAt = (hours: number) => settleAfter(day).getTime() + hours * 3_600_000;
+    if (stravaOn && !synced) {
+      if (now.getTime() < giveUpAt(STRAVA_WAIT_HOURS)) {
         // Don't charge for something we couldn't check. Try again on the next run.
-        report.waiting = datesBetween(day, last).filter((d) => d >= day);
+        report.waiting = datesBetween(day, last);
+        report.waitingFor = "strava";
         return;
       }
-      note = `Judged without Strava: it could not be reached for ${STRAVA_WAIT_HOURS} hours.`;
+      notes.push(`Judged without Strava: it could not be reached for ${STRAVA_WAIT_HOURS} hours.`);
     }
+    const ev = await evidenceFor(db, day, kind, version.rules);
+    if (ev.waiting) {
+      if (now.getTime() < giveUpAt(PHOTO_WAIT_HOURS)) {
+        // A photo was sent in time but Claude couldn't read it yet. An outage never becomes a miss.
+        report.waiting = datesBetween(day, last);
+        report.waitingFor = "photo";
+        return;
+      }
+      await markUnchecked(db, day);
+      notes.push(`Photo counted without a check: Claude could not be reached for ${PHOTO_WAIT_HOURS} hours.`);
+      await logEvent(db, now, "photo", `${day}: photo counted without a check`);
+    }
+    const note = notes.length ? notes.join(" ") : null;
     const res = await judgeDay(db, day, kind, version.rules, now, note);
     if (res.fresh) {
       report.judged.push({ date: day, kind, status: res.status, chargeCents: res.charge, practice: res.practice });
@@ -393,7 +420,7 @@ async function money(db: Db, bank: BankPort, now: Date, report: SettleReport): P
 }
 
 export async function runSettlement(db: Db, ports: Ports, now: Date = new Date()): Promise<SettleReport> {
-  const report: SettleReport = { busy: false, judged: [], waiting: [], paid: [], payProblems: [], returnedCents: 0, notes: [] };
+  const report: SettleReport = { busy: false, judged: [], waiting: [], waitingFor: null, paid: [], payProblems: [], returnedCents: 0, notes: [] };
   if (!(await acquireLock(db, "settle", 180))) return { ...report, busy: true };
   try {
     const today = localDate(now);

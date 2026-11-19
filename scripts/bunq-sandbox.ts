@@ -15,7 +15,7 @@ import { BankError } from "../lib/ports";
 import { arm, ensureRules, saveRules } from "../lib/rules";
 import { runSettlement } from "../lib/settle";
 import { addDays, localDate, weekStart } from "../lib/time";
-import { FakeStrava } from "../tests/fakes";
+import { FakePhotoCheck, FakeStrava } from "../tests/fakes";
 
 process.env.APP_SECRET ||= "sandbox-check-secret-0123456789-abcdefghij";
 
@@ -70,6 +70,7 @@ async function main() {
   await saveBunq(db, me.current);
   const bank = new BunqBank(db);
   const strava = new FakeStrava(); // linked, and no activities at all: every session is a miss
+  const photos = new FakePhotoCheck(); // and no photos are uploaded either
 
   // Arm at the start of last week, then run the nightly job once, now.
   const now = new Date();
@@ -80,7 +81,7 @@ async function main() {
   await saveRules(db, opened, { ...DEFAULT_RULES, friendName: friend.current.accountName, friendIban: friend.current.accountIban });
   await arm(db, opened);
 
-  const report = await runSettlement(db, { strava, bank }, now);
+  const report = await runSettlement(db, { strava, bank, photos }, now);
   const lastWeek = report.judged.filter((j) => j.date < addDays(monday, 7));
   check("last week judged as five misses", lastWeek.length === 5 && lastWeek.every((j) => j.status === "missed"));
   check("charges are 10, 20, 40, 80, 0", JSON.stringify(lastWeek.map((j) => j.chargeCents)) === "[1000,2000,4000,8000,0]");
@@ -93,14 +94,14 @@ async function main() {
   check("friend received every penalty", total === expected && got.length === report.paid.length, `${got.length} transfers, ${total} cents, expected ${expected}`);
   check("transfers came from my IBAN", got.every((p) => p.counterpartyIban === me.current.accountIban));
 
-  const again = await runSettlement(db, { strava, bank }, new Date());
+  const again = await runSettlement(db, { strava, bank, photos }, new Date());
   await sleep(1000);
   const after = (await friend.listPayments()).filter((p) => p.amountCents > 0 && p.description.includes("SHOWUP-"));
   check("a second run sends nothing more", again.paid.length === 0 && after.length === got.length);
 
   // A "lost answer": pretend the app never heard back about a payment that did go out.
   await db.query("UPDATE penalties SET status = 'sending', bank_payment_id = NULL, sent_at = NULL, sending_at = now() WHERE id = (SELECT MIN(id) FROM penalties)");
-  await runSettlement(db, { strava, bank }, new Date());
+  await runSettlement(db, { strava, bank, photos }, new Date());
   const recovered = await db.query<{ status: string; bank_payment_id: string | null }>("SELECT status, bank_payment_id FROM penalties ORDER BY id LIMIT 1");
   await sleep(1000);
   const afterLost = (await friend.listPayments()).filter((p) => p.amountCents > 0 && p.description.includes("SHOWUP-"));
@@ -110,7 +111,7 @@ async function main() {
   await friend.pay({ amountCents: 3000, iban: me.current.accountIban, name: me.current.accountName, description: "Showup return" });
   await friend.pay({ amountCents: 700, iban: me.current.accountIban, name: me.current.accountName, description: "lunch" });
   await sleep(1500);
-  const back = await runSettlement(db, { strava, bank }, new Date());
+  const back = await runSettlement(db, { strava, bank, photos }, new Date());
   const rows = await db.query<{ status: string; returned_cents: number }>("SELECT status, returned_cents FROM penalties ORDER BY session_date");
   check("returned money is matched oldest first", back.returnedCents === 3000 && rows[0].status === "returned" && rows[1].status === "returned" && rows[2].status === "held", JSON.stringify(rows));
   const inc = await db.query<{ is_return: boolean; description: string }>("SELECT is_return, description FROM incoming ORDER BY amount_cents");

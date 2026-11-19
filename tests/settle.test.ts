@@ -3,13 +3,14 @@ import { applyBankSwitch, planBankSwitch } from "../lib/bank-switch";
 import { type Db, openTestDb } from "../lib/db";
 import { DEFAULT_RULES } from "../lib/engine";
 import { kvGet, kvSet } from "../lib/kv";
-import { ProofError, proofTarget, saveProof } from "../lib/proofs";
+import { PhotoCheckError } from "../lib/ports";
+import { ProofError, proofTargets, saveProof } from "../lib/proofs";
 import { LOCK_DAYS, RuleError, arm, cancelPending, disarm, ensureRules, ruleState, rulesFor, saveRules } from "../lib/rules";
 import { activitiesOn, penaltyRef, runSettlement, settlementDue } from "../lib/settle";
 import { SickError, claimSick, sickDaysUsed, sickState, unclaimSick } from "../lib/sick";
 import { type Ymd, addDays, datesBetween } from "../lib/time";
 import { dashboard, history } from "../lib/views";
-import { FakeBank, FakeStrava, at } from "./fakes";
+import { FakeBank, FakePhotoCheck, FakeStrava, at } from "./fakes";
 
 process.env.APP_SECRET = "test-secret-that-is-long-enough-0123456789";
 
@@ -20,6 +21,7 @@ const FRIEND = { friendName: "Sam Friend", friendIban: "NL91ABNA0417164300" };
 let db: Db;
 let strava: FakeStrava;
 let bank: FakeBank;
+let photos: FakePhotoCheck;
 let clock: Date;
 
 beforeAll(async () => {
@@ -32,6 +34,7 @@ beforeEach(async () => {
   );
   strava = new FakeStrava();
   bank = new FakeBank();
+  photos = new FakePhotoCheck();
   clock = at("2026-11-22", "10:00");
   bank.now = () => clock;
 });
@@ -39,7 +42,7 @@ beforeEach(async () => {
 /** One run of the nightly job at the given moment. */
 async function settleAt(day: Ymd, time = "03:30") {
   clock = at(day, time);
-  return runSettlement(db, { strava, bank }, clock);
+  return runSettlement(db, { strava, bank, photos }, clock);
 }
 
 /** Runs the nightly job after each day in the range (at 03:30 the next morning). */
@@ -198,9 +201,10 @@ describe("judging days", () => {
     expect(bank.payCalls).toBe(0);
   });
 
-  it("records nothing in practice when Strava isn't linked", async () => {
+  it("records nothing in practice while nothing can check a session (no photo check, no Strava)", async () => {
     await practice();
     strava.linked = false;
+    photos.linked = false;
     await nightly("2026-11-22", "2026-11-25");
     expect(await sessions()).toEqual([]);
     expect(await kvGet(db, "cursor")).toBe("2026-11-25");
@@ -224,9 +228,11 @@ describe("judging days", () => {
   });
 });
 
-async function saveProofOn(day: Ymd, time = "20:00", seed = Number(day.slice(8))) {
-  return saveProof(db, at(day, time), jpeg(seed));
+/** Uploads a photo on `day` at `time`, for the session of `forDay` (the same day unless said). */
+async function saveProofOn(day: Ymd, time = "20:00", seed = Number(day.slice(8)), forDay: Ymd = day) {
+  return saveProof(db, at(day, time), forDay, jpeg(seed), photos);
 }
+const targets = async (now: Date) => (await proofTargets(db, now)).map((t) => t.date);
 
 describe("catching up and running twice", () => {
   it("settles a whole backlog in one go and changes nothing on a second run", async () => {
@@ -245,7 +251,7 @@ describe("catching up and running twice", () => {
   it("lets only one of two simultaneous runs do the work", async () => {
     await armed();
     clock = at("2026-11-29", "03:30");
-    const [a, b] = await Promise.all([runSettlement(db, { strava, bank }, clock), runSettlement(db, { strava, bank }, clock)]);
+    const [a, b] = await Promise.all([runSettlement(db, { strava, bank, photos }, clock), runSettlement(db, { strava, bank, photos }, clock)]);
     expect([a.busy, b.busy].sort()).toEqual([false, true]);
     expect(bank.sent).toHaveLength(4);
     expect(bank.sentTotal).toBe(15000);
@@ -496,10 +502,10 @@ describe("rule changes", () => {
   });
 });
 
-describe("workout screenshots", () => {
+describe("workout photos", () => {
   it("count for today's strength session and can be replaced until the day is judged", async () => {
     await armed();
-    expect(await proofTarget(db, at("2026-11-24", "19:00"))).toBe("2026-11-24");
+    expect(await targets(at("2026-11-24", "19:00"))).toEqual(["2026-11-24"]);
     const a = await saveProofOn("2026-11-24", "19:00", 1);
     const b = await saveProofOn("2026-11-24", "19:05", 2);
     expect(a.date).toBe("2026-11-24");
@@ -509,27 +515,163 @@ describe("workout screenshots", () => {
 
   it("count for yesterday when uploaded just after midnight, but not after 03:00", async () => {
     await armed();
-    expect(await proofTarget(db, at("2026-11-25", "00:30"))).toBe("2026-11-24");
-    expect(await proofTarget(db, at("2026-11-25", "03:00"))).toBeNull();
-    await saveProofOn("2026-11-25", "00:30");
+    // Wednesday is a run day itself, so both days are open just after midnight.
+    expect(await targets(at("2026-11-25", "00:30"))).toEqual(["2026-11-25", "2026-11-24"]);
+    expect(await targets(at("2026-11-25", "03:00"))).toEqual(["2026-11-25"]);
+    await saveProofOn("2026-11-25", "00:30", 3, "2026-11-24");
     await settleAt("2026-11-25");
     expect((await session("2026-11-24")).status).toBe("done");
+    await expect(saveProofOn("2026-11-25", "03:10", 4, "2026-11-24")).rejects.toThrow("no training session");
   });
 
-  it("are refused on run days, rest days, and after the day was judged", async () => {
+  it("prove runs too", async () => {
     await armed();
-    await expect(saveProofOn("2026-11-23")).rejects.toThrow(ProofError);
-    await expect(saveProofOn("2026-11-26")).rejects.toThrow("no strength session");
+    strava.linked = false;
+    const saved = await saveProofOn("2026-11-23", "19:00", 1);
+    expect(saved).toMatchObject({ date: "2026-11-23", kind: "run", status: "accepted" });
+    await settleAt("2026-11-24");
+    expect(await session("2026-11-23")).toMatchObject({ status: "done", source: "proof", charge_cents: 0 });
+  });
+
+  it("are refused on rest days, for days that are not open, and after the day was judged", async () => {
+    await armed();
+    await expect(saveProofOn("2026-11-26")).rejects.toThrow(ProofError);
+    await expect(saveProofOn("2026-11-24", "19:00", 1, "2026-11-27")).rejects.toThrow("no training session");
+    await expect(saveProofOn("2026-11-24", "19:00", 1, "not a day")).rejects.toThrow("no training session");
     await settleAt("2026-11-25");
-    await expect(saveProof(db, at("2026-11-25", "04:00"), jpeg(9))).rejects.toThrow("no strength session");
+    await expect(saveProof(db, at("2026-11-25", "04:00"), "2026-11-24", jpeg(9), photos)).rejects.toThrow("no training session");
   });
 
   it("can't be reused on another day, and must be real pictures", async () => {
     await armed();
     await saveProofOn("2026-11-24", "19:00", 7);
     await expect(saveProofOn("2026-11-27", "19:00", 7)).rejects.toThrow("already used");
-    await expect(saveProof(db, at("2026-11-27", "19:00"), new Uint8Array([1, 2, 3, 4, 5]))).rejects.toThrow("not a JPEG");
-    await expect(saveProof(db, at("2026-11-27", "19:00"), new Uint8Array())).rejects.toThrow("empty");
+    await expect(saveProof(db, at("2026-11-27", "19:00"), "2026-11-27", new Uint8Array([1, 2, 3, 4, 5]), photos)).rejects.toThrow("not a JPEG");
+    await expect(saveProof(db, at("2026-11-27", "19:00"), "2026-11-27", new Uint8Array(), photos)).rejects.toThrow("empty");
+  });
+});
+
+describe("the photo check", () => {
+  const stored = () => db.query<{ session_date: string; check_status: string }>("SELECT session_date, check_status FROM proofs ORDER BY session_date");
+
+  it("refuses photos that don't prove the session, keeps none of them, and says why", async () => {
+    await armed();
+    strava.linked = false;
+    photos.show = { activity: "strength" };
+    await expect(saveProofOn("2026-11-23", "19:00", 1)).rejects.toThrow("shows a strength workout, but the session due is a run");
+    photos.show = { dateShown: "2026-11-16" };
+    await expect(saveProofOn("2026-11-23", "19:00", 2)).rejects.toThrow("from Mon 16 Nov, not from Mon 23 Nov");
+    photos.show = { dateShown: null };
+    await expect(saveProofOn("2026-11-23", "19:00", 3)).rejects.toThrow("date isn't visible");
+    photos.show = { distanceKm: 3.49 };
+    await expect(saveProofOn("2026-11-23", "19:00", 4)).rejects.toThrow("3.49 km. It needs 3.5 km");
+    photos.show = { isWorkoutRecord: false, activity: "none" };
+    await expect(saveProofOn("2026-11-23", "19:00", 5)).rejects.toThrow("doesn't look like a workout record");
+    photos.show = { durationS: 19 * 60 };
+    await expect(saveProofOn("2026-11-24", "19:00", 6)).rejects.toThrow("19 min. It needs 20 min");
+    expect(await stored()).toEqual([]);
+    await settleAt("2026-11-25");
+    expect((await session("2026-11-23")).status).toBe("missed");
+  });
+
+  it("accepts exactly the minimum, and a 'today' that Claude resolved to the right date", async () => {
+    await armed();
+    photos.show = { distanceKm: 3.5 };
+    await expect(saveProofOn("2026-11-23", "19:00", 1)).resolves.toMatchObject({ status: "accepted" });
+    photos.show = { durationS: 20 * 60 };
+    await expect(saveProofOn("2026-11-24", "19:00", 2)).resolves.toMatchObject({ status: "accepted" });
+  });
+
+  it("shows Claude the latest earlier photos of the same kind, and refuses the same workout twice", async () => {
+    await armed();
+    await saveProofOn("2026-11-23", "19:00", 1);
+    await saveProofOn("2026-11-24", "19:00", 2);
+    await saveProofOn("2026-11-25", "19:00", 3);
+    const last = photos.calls[photos.calls.length - 1];
+    expect(last.earlier.map((e) => e.day)).toEqual(["2026-11-23"]); // runs only, the strength photo is left out
+    photos.show = { sameAsDay: "2026-11-25" };
+    await expect(saveProofOn("2026-11-28", "19:00", 4)).rejects.toThrow("same workout as the photo from Wed 25 Nov");
+  });
+
+  it("refuses a photo with exactly the figures of an earlier one, even when its date was changed", async () => {
+    await armed();
+    photos.show = { distanceKm: 6.12, durationS: 2041 };
+    await saveProofOn("2026-11-23", "19:00", 1);
+    await expect(saveProofOn("2026-11-25", "19:00", 2)).rejects.toThrow("exactly the same figures as the photo from Mon 23 Nov");
+    photos.show = { distanceKm: 6.12, durationS: 2042 };
+    await expect(saveProofOn("2026-11-25", "19:00", 3)).resolves.toMatchObject({ status: "accepted" });
+  });
+
+  it("needs a working key: without one, or with a broken one, nothing is stored", async () => {
+    await armed();
+    photos.linked = false;
+    await expect(saveProofOn("2026-11-24")).rejects.toThrow("Add a Claude API key");
+    photos.linked = true;
+    photos.failWith = new PhotoCheckError("Claude refused the API key. Paste a working key in Settings.", "setup");
+    await expect(saveProofOn("2026-11-24")).rejects.toThrow("refused the API key");
+    photos.failWith = new PhotoCheckError("Claude would not read this picture.", "refused");
+    await expect(saveProofOn("2026-11-24")).rejects.toThrow("would not read");
+    expect(await stored()).toEqual([]);
+  });
+
+  it("keeps a photo it couldn't check as waiting, holds the day, and judges it once Claude is back", async () => {
+    await armed();
+    photos.down = true;
+    await expect(saveProofOn("2026-11-24")).resolves.toMatchObject({ status: "waiting" });
+    expect((await dashboard(db, at("2026-11-24", "21:00"))).today).toMatchObject({ state: "due", photoWaiting: true });
+    const r = await settleAt("2026-11-25");
+    expect(r.waitingFor).toBe("photo");
+    expect(r.waiting).toContain("2026-11-24");
+    expect((await session("2026-11-23")).status).toBe("missed");
+    expect(await session("2026-11-24")).toBeUndefined();
+    photos.down = false;
+    await settleAt("2026-11-25", "09:00");
+    expect(await session("2026-11-24")).toMatchObject({ status: "done", source: "proof", charge_cents: 0 });
+    expect(await stored()).toEqual([{ session_date: "2026-11-24", check_status: "accepted" }]);
+  });
+
+  it("drops a waiting photo that fails once it is checked, and the day counts as missed", async () => {
+    await armed();
+    photos.down = true;
+    await saveProofOn("2026-11-24");
+    photos.down = false;
+    photos.show = { durationS: 600 };
+    await settleAt("2026-11-25");
+    expect(await stored()).toEqual([]);
+    expect((await session("2026-11-24")).status).toBe("missed");
+    expect((await dashboard(db, at("2026-11-25", "09:00"))).alerts.map((a) => a.text).join(" ")).toContain("did not count: This workout is 10 min");
+  });
+
+  it("counts a waiting photo without a check after 72 hours of Claude being down, and says so", async () => {
+    await armed();
+    photos.down = true;
+    await saveProofOn("2026-11-24");
+    await settleAt("2026-11-27", "02:59");
+    expect(await session("2026-11-24")).toBeUndefined();
+    await settleAt("2026-11-28", "03:30");
+    const s = await session("2026-11-24");
+    expect([s.status, s.source]).toEqual(["done", "proof"]);
+    expect(s.note).toContain("without a check");
+    expect(await stored()).toEqual([{ session_date: "2026-11-24", check_status: "unchecked" }]);
+  });
+
+  it("never lets a photo it couldn't check replace one that already counts", async () => {
+    await armed();
+    await saveProofOn("2026-11-24", "19:00", 1);
+    photos.down = true;
+    await expect(saveProofOn("2026-11-24", "19:30", 2)).rejects.toThrow("earlier photo for Tue 24 Nov still counts");
+    expect(await stored()).toEqual([{ session_date: "2026-11-24", check_status: "accepted" }]);
+  });
+
+  it("judges practice days once a key is saved, even without Strava", async () => {
+    await practice();
+    strava.linked = false;
+    await saveProofOn("2026-11-23", "19:00", 1);
+    await nightly("2026-11-23", "2026-11-24");
+    expect((await sessions()).map((x) => [x.date.slice(8), x.status, x.practice])).toEqual([
+      ["23", "done", true],
+      ["24", "missed", true],
+    ]);
   });
 });
 
@@ -588,7 +730,7 @@ describe("test money and real money", () => {
     const real = new FakeBank();
     real.now = () => clock;
     clock = at("2026-11-28", "03:30");
-    await runSettlement(db, { strava, bank: real }, clock);
+    await runSettlement(db, { strava, bank: real, photos }, clock);
     expect(await penalties()).toEqual([]);
     expect(real.sent).toEqual([]);
     expect((await session("2026-11-25")).practice).toBe(true);
@@ -685,7 +827,7 @@ describe("sick days", () => {
     await sick("2026-11-23"); // run day
     strava.run("2026-11-23", 4.2, "19:00");
     await sick("2026-11-24"); // strength day
-    await saveProof(db, at("2026-11-24", "20:00"), jpeg(1));
+    await saveProof(db, at("2026-11-24", "20:00"), "2026-11-24", jpeg(1), photos);
     expect(await sickDaysUsed(db, "2026-11-24")).toBe(2);
 
     await nightly("2026-11-23", "2026-11-24");

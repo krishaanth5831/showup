@@ -4,7 +4,7 @@
 
 import { Copy } from "@phosphor-icons/react";
 import { useState } from "react";
-import { connectBunqAction, saveRulesAction, saveStravaAppAction } from "@/app/actions";
+import { connectBunqAction, connectClaudeAction, saveRulesAction, saveStravaAppAction } from "@/app/actions";
 import type { Rules } from "@/lib/engine";
 import { WEEKDAYS, weekdayLabel } from "@/lib/time";
 import { ActionForm, Field, Submit } from "./forms";
@@ -19,6 +19,17 @@ export function StravaAppForm({ clientId }: { clientId: string }) {
         <Submit variant="outline" busy="Saving">
           Save Strava keys
         </Submit>
+      </div>
+    </ActionForm>
+  );
+}
+
+export function ClaudeForm() {
+  return (
+    <ActionForm action={connectClaudeAction} className="flex flex-col gap-5">
+      <Field label="Claude API key" name="apiKey" type="password" autoComplete="off" required hint="Stored encrypted. It is never shown again." />
+      <div>
+        <Submit busy="Checking the key">Save key</Submit>
       </div>
     </ActionForm>
   );
@@ -68,7 +79,7 @@ export function RulesForm({ rules, locked, lockDays }: { rules: Rules; locked: b
           <Field label="Shortest run (km)" name="minRunKm" inputMode="decimal" defaultValue={rules.minRunKm} required />
           <Field label="Shortest workout (min)" name="minStrengthMin" inputMode="numeric" defaultValue={rules.minStrengthMin} required />
         </div>
-        <p className="mt-2 text-sm leading-snug text-muted">The workout length only applies to strength sessions found on Strava. A screenshot always counts.</p>
+        <p className="mt-2 text-sm leading-snug text-muted">A run photo has to show at least this distance, and a strength photo at least this length.</p>
       </fieldset>
 
       <fieldset>

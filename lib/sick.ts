@@ -44,10 +44,11 @@ export async function isSickDay(db: Db, day: Ymd): Promise<boolean> {
 }
 
 /**
- * stravaOn: whether Strava is connected. In practice mode without Strava no day is judged
- * at all, so a sick day there would be used up for nothing and is not offered.
+ * checksOn: whether anything can check a session (the photo check or Strava). In practice
+ * mode without either no day is judged at all, so a sick day there would be used up for
+ * nothing and is not offered.
  */
-export async function sickState(db: Db, now: Date, stravaOn: boolean): Promise<SickState> {
+export async function sickState(db: Db, now: Date, checksOn: boolean): Promise<SickState> {
   const today = localDate(now);
   const candidates: Ymd[] = [today];
   const yesterday = addDays(today, -1);
@@ -59,7 +60,7 @@ export async function sickState(db: Db, now: Date, stravaOn: boolean): Promise<S
     const rules = (await rulesFor(db, day))?.rules;
     const kind = rules?.schedule[weekdayOf(day)];
     if (!rules || !kind) continue;
-    if (!rules.armed && !stravaOn) continue;
+    if (!rules.armed && !checksOn) continue;
     const judged = await db.query("SELECT 1 FROM sessions WHERE date = $1", [day]);
     if (judged.length) continue;
     const used = await sickDaysUsed(db, day);
@@ -72,9 +73,9 @@ export async function sickState(db: Db, now: Date, stravaOn: boolean): Promise<S
 }
 
 /** Marks an open training day as a sick day. */
-export async function claimSick(db: Db, now: Date, day: string, stravaOn: boolean): Promise<SickOption> {
+export async function claimSick(db: Db, now: Date, day: string, checksOn: boolean): Promise<SickOption> {
   if (!isYmd(day)) throw new SickError("That is not a day.");
-  const option = (await sickState(db, now, stravaOn)).open.find((o) => o.date === day);
+  const option = (await sickState(db, now, checksOn)).open.find((o) => o.date === day);
   if (!option) throw new SickError("A sick day can only be used for a training day, on the day itself or until 03:00 the next morning.");
   if (option.claimed) throw new SickError(`${shortDate(day)} is already a sick day.`);
   if (option.limit === 0) throw new SickError("Sick days are switched off in the rules.");
@@ -95,9 +96,9 @@ export async function claimSick(db: Db, now: Date, day: string, stravaOn: boolea
 }
 
 /** Takes a sick day back, as long as the day has not been judged. */
-export async function unclaimSick(db: Db, now: Date, day: string, stravaOn: boolean): Promise<void> {
+export async function unclaimSick(db: Db, now: Date, day: string, checksOn: boolean): Promise<void> {
   if (!isYmd(day)) throw new SickError("That is not a day.");
-  const option = (await sickState(db, now, stravaOn)).open.find((o) => o.date === day);
+  const option = (await sickState(db, now, checksOn)).open.find((o) => o.date === day);
   if (!option || !option.claimed) throw new SickError("That sick day can't be taken back any more.");
   await db.query("DELETE FROM sick_days WHERE session_date = $1", [day]);
   await logEvent(db, now, "sick", `${day}: sick day taken back`);

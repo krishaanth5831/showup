@@ -5,18 +5,19 @@ import { refresh } from "next/cache";
 import { redirect } from "next/navigation";
 import { createPassword, login, logout, requireUser } from "@/lib/auth";
 import { BunqClient, bunqClient, bunqConnect, loadBunq, saveBunq } from "@/lib/bunq";
+import { ClaudePhotoCheck, connectClaude, loadClaude } from "@/lib/claude";
 import { getDb } from "@/lib/db";
 import { type Kind, type Rules, isValidIban, normalizeIban } from "@/lib/engine";
 import { kvDelete, kvSet, logEvent } from "@/lib/kv";
-import { BankError, StravaError } from "@/lib/ports";
+import { BankError, PhotoCheckError, StravaError } from "@/lib/ports";
 import { ProofError, saveProof } from "@/lib/proofs";
 import { RuleError, arm, cancelPending, disarm, ruleState, saveRules } from "@/lib/rules";
 import { allocateReturns, runSettlement } from "@/lib/settle";
 import { SickError, claimSick, unclaimSick } from "@/lib/sick";
 import { randomToken } from "@/lib/secrets";
-import { loadStrava, saveStrava, stravaLinked } from "@/lib/strava";
+import { loadStrava, saveStrava } from "@/lib/strava";
 import { WEEKDAYS, localDate, longDate, monthName, shortDate } from "@/lib/time";
-import { realPorts, summarize } from "@/lib/work";
+import { checksOn, realPorts, summarize } from "@/lib/work";
 
 export interface FormState {
   ok?: string;
@@ -25,7 +26,14 @@ export interface FormState {
 
 /** Turns anything thrown into a message a person can act on. */
 function fail(e: unknown): FormState {
-  if (e instanceof RuleError || e instanceof ProofError || e instanceof SickError || e instanceof BankError || e instanceof StravaError) {
+  if (
+    e instanceof RuleError ||
+    e instanceof ProofError ||
+    e instanceof SickError ||
+    e instanceof BankError ||
+    e instanceof StravaError ||
+    e instanceof PhotoCheckError
+  ) {
     return { error: e.message };
   }
   console.error(e);
@@ -55,14 +63,18 @@ export async function logoutAction(): Promise<void> {
 
 // ---------- today ----------
 
-export async function uploadProofAction(_prev: FormState, form: FormData): Promise<FormState> {
+/** A workout photo for one training day. The day comes from the button and is checked again on the server. */
+export async function uploadProofAction(day: string, _prev: FormState, form: FormData): Promise<FormState> {
   const db = await requireUser();
   const file = form.get("image");
   if (!(file instanceof File) || file.size === 0) return { error: "Choose a picture first." };
   try {
-    const saved = await saveProof(db, new Date(), new Uint8Array(await file.arrayBuffer()));
+    const saved = await saveProof(db, new Date(), day, new Uint8Array(await file.arrayBuffer()), new ClaudePhotoCheck(db));
     refresh();
-    return { ok: `Saved for ${shortDate(saved.date)}.` };
+    if (saved.status === "waiting") {
+      return { ok: `Saved for ${shortDate(saved.date)}, but Claude can't be reached right now. It is checked again shortly, and the day waits for it.` };
+    }
+    return { ok: `Counted for ${shortDate(saved.date)}.${saved.summary ? ` ${saved.summary}` : ""}` };
   } catch (e) {
     return fail(e);
   }
@@ -72,7 +84,7 @@ export async function uploadProofAction(_prev: FormState, form: FormData): Promi
 export async function sickDayAction(day: string, _prev: FormState): Promise<FormState> {
   const db = await requireUser();
   try {
-    const used = await claimSick(db, new Date(), day, stravaLinked(await loadStrava(db)));
+    const used = await claimSick(db, new Date(), day, await checksOn(db));
     refresh();
     return { ok: `Sick day used for ${shortDate(used.date)}. ${used.left} of ${used.limit} left in ${monthName(used.date)}.` };
   } catch (e) {
@@ -83,7 +95,7 @@ export async function sickDayAction(day: string, _prev: FormState): Promise<Form
 export async function undoSickDayAction(day: string, _prev: FormState): Promise<FormState> {
   const db = await requireUser();
   try {
-    await unclaimSick(db, new Date(), day, stravaLinked(await loadStrava(db)));
+    await unclaimSick(db, new Date(), day, await checksOn(db));
     refresh();
     return { ok: "Sick day taken back." };
   } catch (e) {
@@ -133,11 +145,35 @@ async function lockedOrPlanned(): Promise<boolean> {
 
 export async function disconnectStravaAction(_prev: FormState): Promise<FormState> {
   const db = await requireUser();
-  if (await lockedOrPlanned()) return { error: "Strava can't be disconnected while real money is on." };
+  // Strava is an extra way to prove a session, next to photos, so it can go at any time.
   await kvDelete(db, "strava");
   await kvDelete(db, "strava_sync");
   refresh();
   return { ok: "Strava disconnected." };
+}
+
+// ---------- photo check ----------
+
+export async function connectClaudeAction(_prev: FormState, form: FormData): Promise<FormState> {
+  const db = await requireUser();
+  const apiKey = String(form.get("apiKey") ?? "").trim();
+  if (!apiKey.startsWith("sk-ant-")) return { error: "That does not look like a Claude API key. They start with sk-ant-." };
+  try {
+    await connectClaude(db, apiKey);
+    await logEvent(db, new Date(), "photos", "Claude API key saved");
+    refresh();
+    return { ok: "Saved. Workout photos are now checked by Claude." };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+export async function disconnectClaudeAction(_prev: FormState): Promise<FormState> {
+  const db = await requireUser();
+  if (await lockedOrPlanned()) return { error: "The Claude key can't be removed while real money is on: photos couldn't be checked." };
+  await kvDelete(db, "claude");
+  refresh();
+  return { ok: "Claude key removed." };
 }
 
 // ---------- bank ----------
@@ -241,9 +277,9 @@ export async function saveRulesAction(_prev: FormState, form: FormData): Promise
 export async function armAction(_prev: FormState): Promise<FormState> {
   const db = await requireUser();
   try {
-    const strava = await loadStrava(db);
+    const claude = await loadClaude(db);
     const bunq = await loadBunq(db);
-    if (!strava?.refreshToken) return { error: "Connect Strava first." };
+    if (!claude?.apiKey) return { error: "Add a Claude API key first, so photos can be checked." };
     if (!bunq?.accountId) return { error: "Connect bunq first." };
     const from = await arm(db, localDate(new Date()));
     await logEvent(db, new Date(), "rules", `armed from ${from}`);

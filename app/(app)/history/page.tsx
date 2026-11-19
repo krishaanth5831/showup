@@ -80,7 +80,7 @@ async function HistoryContent() {
                         {kindLabel(row.kind)}
                         {row.status === "done"
                           ? row.source === "proof"
-                            ? ", screenshot"
+                            ? ", photo"
                             : ", Strava"
                           : row.status === "missed" && row.streak > 1
                             ? `, miss ${row.streak} in a row`

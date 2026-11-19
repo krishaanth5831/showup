@@ -118,14 +118,23 @@ async function Friend({ params }: { params: Promise<{ token: string }> }) {
         </Section>
 
         {v.proofs.length > 0 && (
-          <Section title="Strength workout screenshots">
-            <p className="mb-5 text-sm leading-relaxed text-muted">Uploaded as proof in the last five weeks. Say something if one looks off.</p>
+          <Section title="Workout photos">
+            <p className="mb-5 text-sm leading-relaxed text-muted">
+              Uploaded as proof in the last five weeks. Each one was read by Claude before it counted. Say something if one looks off.
+            </p>
             <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               {v.proofs.map((p) => (
                 <li key={p.id} className="flex flex-col gap-2">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={`/api/proof/${p.id}?t=${token}`} alt={`Workout screenshot for ${shortDate(p.date)}`} loading="lazy" className="aspect-[3/4] w-full rounded-xl border border-line object-cover" />
-                  <span className="text-xs text-muted">{shortDate(p.date)}</span>
+                  <img src={`/api/proof/${p.id}?t=${token}`} alt={`Workout photo for ${shortDate(p.date)}`} loading="lazy" className="aspect-[3/4] w-full rounded-xl border border-line object-cover" />
+                  <span className="text-xs text-muted">
+                    {shortDate(p.date)}, {p.kind === "run" ? "run" : "strength"}
+                  </span>
+                  {p.summary ? (
+                    <span className="text-xs leading-snug text-muted">{p.summary}</span>
+                  ) : (
+                    !p.checked && <span className="text-xs leading-snug text-muted">Not checked by Claude.</span>
+                  )}
                 </li>
               ))}
             </ul>

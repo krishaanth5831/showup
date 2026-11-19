@@ -1,16 +1,18 @@
 // Read-only summaries for the screens. Nothing in here changes data.
 
 import { type BunqState, loadBunq } from "./bunq";
+import { loadClaude } from "./claude";
 import type { Db } from "./db";
 import { type Activity, type Kind, type Rules, chargeFor, km, whyNot } from "./engine";
 import { kvGet, kvSet } from "./kv";
-import { proofTarget } from "./proofs";
+import { type CheckStatus, proofTargets } from "./proofs";
 import { type RuleState, describeChanges, ruleState, rulesFor } from "./rules";
 import { activitiesOn, evidenceFor } from "./settle";
 import { type SickState, sickDaysUsed, sickState } from "./sick";
 import { loadStrava, stravaLinked } from "./strava";
 import { randomToken } from "./secrets";
-import { type Ymd, addDays, datesBetween, localDate, monthName, weekStart, weekdayOf, zonedToUtc } from "./time";
+import { checksOn } from "./work";
+import { type Ymd, addDays, datesBetween, localDate, monthName, shortDate, weekStart, weekdayOf, zonedToUtc } from "./time";
 
 export type DayState = "done" | "missed" | "sick" | "due" | "checking" | "upcoming" | "rest";
 
@@ -31,12 +33,18 @@ export interface TodayView {
   /** Shown to the owner only. */
   activity: Activity | null;
   proofId: number | null;
+  /** A photo was sent in and is waiting for Claude to check it. */
+  photoWaiting: boolean;
+  /** What Claude read from the photo that counts, in one line. */
+  photoSummary: string | null;
   hint: string | null;
   /** Midnight tonight, as an ISO instant. */
   deadline: string;
   costIfMissedCents: number;
-  /** The day a screenshot uploaded now would count for (today, or yesterday just after midnight). */
-  uploadFor: Ymd | null;
+  /** The days a photo uploaded now can count for: today, and yesterday until 03:00. */
+  uploads: { date: Ymd; kind: Kind }[];
+  /** false until a Claude API key is saved: photos can't be checked without it. */
+  photoCheck: boolean;
 }
 
 export interface Alert {
@@ -139,6 +147,8 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
     let source: TodayView["source"] = null;
     let activity: Activity | null = null;
     let proofId: number | null = null;
+    let photoWaiting = false;
+    let photoSummary: string | null = null;
     if (row) {
       dayState = row.status;
       source = row.source;
@@ -153,6 +163,13 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
       source = ev.source;
       activity = ev.activity;
       proofId = ev.proofId;
+      photoWaiting = ev.waiting;
+      photoSummary = ev.photoSummary;
+    }
+    if (row?.source === "proof" && row.proof_id) {
+      const p = await db.query<{ reading: { summary?: string } | string | null }>("SELECT reading FROM proofs WHERE id = $1", [row.proof_id]);
+      const reading = p[0]?.reading;
+      photoSummary = (typeof reading === "string" ? JSON.parse(reading) : reading)?.summary ?? null;
     }
     week.push({ date: d, kind: row?.kind ?? kind, state: dayState, chargeCents: row?.charge_cents ?? 0, practice: row ? row.practice : !r.armed, isToday: d === today });
     if (d === today) {
@@ -163,10 +180,13 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
         source,
         activity,
         proofId,
+        photoWaiting,
+        photoSummary,
         hint: kind && dayState === "due" ? whyNot(acts, d, kind, r) : null,
         deadline: zonedToUtc(addDays(d, 1)).toISOString(),
         costIfMissedCents: 0,
-        uploadFor: null,
+        uploads: [],
+        photoCheck: false,
       };
     }
   }
@@ -185,7 +205,8 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
   const t = await totals(db);
   const tv = todayView as TodayView;
   tv.costIfMissedCents = next.cents;
-  tv.uploadFor = await proofTarget(db, now);
+  tv.uploads = await proofTargets(db, now);
+  tv.photoCheck = !!(await loadClaude(db))?.apiKey;
 
   return {
     today: tv,
@@ -199,7 +220,7 @@ export async function dashboard(db: Db, now: Date): Promise<Dashboard> {
     heldCents: t.heldCents,
     owedCents: t.owedCents,
     friendName: rules.friendName,
-    sick: await sickState(db, now, stravaLinked(await loadStrava(db))),
+    sick: await sickState(db, now, await checksOn(db)),
     alerts: await alerts(db, state, t),
   };
 }
@@ -217,9 +238,21 @@ async function alerts(db: Db, state: RuleState, t: Totals): Promise<Alert[]> {
   const strava = await loadStrava(db);
   const bunq = await loadBunq(db);
 
-  if (!stravaLinked(strava)) {
-    out.push({ tone: willBeArmed ? "warn" : "info", text: "Strava is not connected, so runs can't be checked.", href: "/settings#strava", action: "Connect" });
-  } else {
+  if (!(await loadClaude(db))?.apiKey) {
+    out.push({ tone: willBeArmed ? "warn" : "info", text: "No Claude API key yet, so workout photos can't be checked.", href: "/settings#photos", action: "Add" });
+  }
+  const refused = await kvGet<{ day: Ymd; why: string; at: string }>(db, "photo_refused");
+  if (refused && Date.now() - new Date(refused.at).getTime() < 3 * 86_400_000) {
+    out.push({ tone: "warn", text: `The photo for ${shortDate(refused.day)} was checked late and did not count: ${refused.why}` });
+  }
+  const waiting = await db.query<{ check_error: string | null }>("SELECT check_error FROM proofs WHERE check_status = 'waiting' ORDER BY session_date LIMIT 1");
+  if (waiting.length) {
+    out.push({
+      tone: "info",
+      text: `A photo is waiting to be checked${waiting[0].check_error ? ` (${waiting[0].check_error})` : ""}. Its day won't be judged before then.`,
+    });
+  }
+  if (stravaLinked(strava)) {
     const sync = await kvGet<CheckState>(db, "strava_sync");
     if (sync && !sync.ok) out.push({ tone: "warn", text: `Strava could not be read. ${sync.error ?? ""}`.trim(), href: "/settings#strava", action: "Check" });
   }
@@ -368,7 +401,7 @@ export interface FriendView {
   owedCents: number;
   returnedCents: number;
   transfers: FriendTransfer[];
-  proofs: { id: number; date: Ymd }[];
+  proofs: { id: number; date: Ymd; kind: Kind; summary: string | null; checked: boolean }[];
   /** Sick days used in the current month, for the friend to keep an eye on. */
   sick: { month: string; used: number; limit: number };
 }
@@ -401,8 +434,8 @@ export async function friendView(db: Db, now: Date): Promise<FriendView> {
     };
   });
   const t = await totals(db);
-  const proofs = await db.query<{ id: number; session_date: string }>(
-    "SELECT id, session_date FROM proofs WHERE session_date >= $1 ORDER BY session_date DESC",
+  const proofs = await db.query<{ id: number; session_date: string; kind: Kind; check_status: CheckStatus; reading: { summary?: string } | string | null }>(
+    "SELECT id, session_date, kind, check_status, reading FROM proofs WHERE session_date >= $1 AND check_status <> 'waiting' ORDER BY session_date DESC",
     [addDays(today, -35)],
   );
   return {
@@ -415,7 +448,13 @@ export async function friendView(db: Db, now: Date): Promise<FriendView> {
     owedCents: t.owedCents,
     returnedCents: t.returnedCents,
     transfers,
-    proofs: proofs.map((p) => ({ id: p.id, date: p.session_date })),
+    proofs: proofs.map((p) => ({
+      id: p.id,
+      date: p.session_date,
+      kind: p.kind,
+      summary: (typeof p.reading === "string" ? JSON.parse(p.reading) : p.reading)?.summary ?? null,
+      checked: p.check_status === "accepted" && !!p.reading,
+    })),
     sick: { month: monthName(today), used: await sickDaysUsed(db, today), limit: rules.sickDaysPerMonth },
   };
 }
@@ -427,6 +466,7 @@ export interface SettingsView {
   pendingChanges: string[];
   today: Ymd;
   strava: { hasApp: boolean; linked: boolean; clientId: string; athleteName: string; lastSync: CheckState | null };
+  claude: { connected: boolean; hint: string; connectedAt: string | null };
   bank: { connected: boolean; env: "sandbox" | "production" | null; userName: string; accountLabel: string; accountIban: string; accountName: string; lastCheck: CheckState | null };
   friendLink: string;
   lastRun: { at: string; judged: number; problems: number } | null;
@@ -438,9 +478,10 @@ export async function settingsView(db: Db, now: Date): Promise<SettingsView> {
   const rules = await ruleState(db, today);
   const strava = await loadStrava(db);
   const bunq = await loadBunq(db);
+  const claude = await loadClaude(db);
   const r = rules.current.rules;
   const missing: string[] = [];
-  if (!stravaLinked(strava)) missing.push("connect Strava");
+  if (!claude?.apiKey) missing.push("add a Claude API key");
   if (!bunq?.accountId) missing.push("connect bunq");
   if (!r.friendName || !r.friendIban) missing.push("add your friend's name and IBAN");
   return {
@@ -454,6 +495,7 @@ export async function settingsView(db: Db, now: Date): Promise<SettingsView> {
       athleteName: strava?.athleteName ?? "",
       lastSync: await kvGet<CheckState>(db, "strava_sync"),
     },
+    claude: { connected: !!claude?.apiKey, hint: claude?.hint ?? "", connectedAt: claude?.connectedAt ?? null },
     bank: {
       connected: !!bunq?.accountId,
       env: bunq?.env ?? null,

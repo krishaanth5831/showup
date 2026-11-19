@@ -1,7 +1,7 @@
 // The rules of the game, as pure functions: what counts as a session, and what a miss costs.
 // Nothing in here touches the database, the clock or the network, so it can be tested exhaustively.
 
-import type { Weekday, Ymd } from "./time";
+import { type Weekday, type Ymd, shortDate } from "./time";
 
 export type Kind = "run" | "strength";
 
@@ -118,6 +118,84 @@ export function whyNot(acts: Activity[], day: Ymd, kind: Kind, rules: Rules): st
   if (recorded.length === 0) return "A workout was typed in by hand. Only recorded workouts count.";
   const longest = recorded.reduce((b, a) => (a.elapsedS > b.elapsedS ? a : b));
   return `Workout on Strava is ${Math.floor(Math.max(longest.movingS, longest.elapsedS) / 60)} min. It needs ${rules.minStrengthMin} min, or upload the watch screenshot.`;
+}
+
+// ---- photo proof ----
+
+/** What Claude read from a workout photo. Every figure is null when it is not visible. */
+export interface PhotoReading {
+  /** true when the picture is a record of a workout (a summary screen from a watch or an app). */
+  isWorkoutRecord: boolean;
+  activity: "run" | "strength" | "other" | "none";
+  /** The workout's date as shown, resolved to 'YYYY-MM-DD'. */
+  dateShown: Ymd | null;
+  /** 'HH:MM', 24-hour clock. */
+  startTime: string | null;
+  distanceKm: number | null;
+  durationS: number | null;
+  calories: number | null;
+  /** The day of an earlier photo that shows this same workout, or null. */
+  sameAsDay: Ymd | null;
+  /** One short line in plain words, shown to the owner and the friend. */
+  summary: string;
+}
+
+/** An earlier accepted photo, reduced to what can be compared. */
+export interface EarlierPhoto {
+  day: Ymd;
+  kind: Kind;
+  reading: PhotoReading | null;
+}
+
+export type PhotoVerdict = { ok: true } | { ok: false; why: string };
+
+function minutes(seconds: number): number {
+  return Math.floor(seconds / 60);
+}
+
+/**
+ * Two genuine workouts never show exactly the same figures. Distance to 10 m and length to
+ * the second both matching means the same record was used again (re-cropped, re-shot or edited).
+ */
+export function sameFigures(a: PhotoReading, b: PhotoReading, kind: Kind): boolean {
+  if (a.durationS === null || b.durationS === null || a.durationS !== b.durationS) return false;
+  if (kind === "run") return a.distanceKm !== null && b.distanceKm !== null && Math.round(a.distanceKm * 100) === Math.round(b.distanceKm * 100);
+  return a.calories !== null && b.calories !== null && a.calories === b.calories;
+}
+
+/**
+ * Whether a photo proves the session due on a training day. Claude only reads the picture;
+ * the rules are applied here, so they can be tested without it.
+ */
+export function judgePhoto(r: PhotoReading, day: Ymd, kind: Kind, rules: Rules, earlier: EarlierPhoto[]): PhotoVerdict {
+  const what = kind === "run" ? "run" : "strength workout";
+  if (!r.isWorkoutRecord || r.activity === "none") {
+    return { ok: false, why: `This doesn't look like a workout record. Upload a screenshot of the ${what}'s summary screen.` };
+  }
+  if (r.activity !== kind) {
+    const shown = r.activity === "other" ? "another kind of workout" : r.activity === "run" ? "a run" : "a strength workout";
+    return { ok: false, why: `This shows ${shown}, but the session due is a ${what}.` };
+  }
+  if (!r.dateShown) {
+    return { ok: false, why: "The date isn't visible. Upload a screenshot that shows the date, such as the summary in the Fitness app." };
+  }
+  if (r.dateShown !== day) return { ok: false, why: `This workout is from ${shortDate(r.dateShown)}, not from ${shortDate(day)}.` };
+  if (kind === "run") {
+    if (r.distanceKm === null) return { ok: false, why: "The distance isn't visible. Upload a screenshot that shows it." };
+    // Whole metres, rounded down like Strava distances: 3.4996 km must not pass as 3.5 km.
+    if (Math.floor(r.distanceKm * 1000 + 1e-6) < minRunMetres(rules)) {
+      return { ok: false, why: `This run is ${r.distanceKm.toFixed(2)} km. It needs ${rules.minRunKm} km in one go.` };
+    }
+  } else {
+    if (r.durationS === null) return { ok: false, why: "The length of the workout isn't visible. Upload a screenshot that shows it." };
+    if (r.durationS < rules.minStrengthMin * 60) {
+      return { ok: false, why: `This workout is ${minutes(r.durationS)} min. It needs ${rules.minStrengthMin} min.` };
+    }
+  }
+  if (r.sameAsDay && r.sameAsDay !== day) return { ok: false, why: `This looks like the same workout as the photo from ${shortDate(r.sameAsDay)}.` };
+  const twin = earlier.find((e) => e.day !== day && e.kind === kind && e.reading && sameFigures(r, e.reading, kind));
+  if (twin) return { ok: false, why: `This shows exactly the same figures as the photo from ${shortDate(twin.day)}.` };
+  return { ok: true };
 }
 
 /**

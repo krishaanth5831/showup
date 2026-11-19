@@ -4,8 +4,8 @@
 //   npm run demo            -> seeds .data-demo and starts the app on http://localhost:3210
 //   DEMO_TODAY=run|strength|done|rest npm run demo   -> choose what today looks like
 //
-// Sign in with the password printed at the end. No bank or Strava is connected in the
-// demo, so nothing here can move money.
+// Sign in with the password printed at the end. No bank, Strava or Claude is connected in
+// the demo: a stand-in reads the made-up photos, and nothing here can move money.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -18,7 +18,7 @@ delete process.env.POSTGRES_URL;
 
 const PASSWORD = "demo-password";
 
-/** A plain PNG picture, standing in for a watch screenshot. */
+/** A plain PNG picture, standing in for a workout screenshot. */
 function fakeScreenshot(seed: number): Uint8Array {
   const w = 240;
   const h = 320;
@@ -34,6 +34,9 @@ function fakeScreenshot(seed: number): Uint8Array {
       raw[i + 2] = v + 6;
     }
   }
+  // Stamp the seed into the first pixel, so no two made-up pictures are byte-identical.
+  raw[1] = seed & 255;
+  raw[2] = (seed >> 8) & 255;
   const chunk = (type: string, data: Buffer) => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
@@ -59,14 +62,21 @@ async function main() {
   const { saveProof } = await import("../lib/proofs");
   const { arm, ensureRules, rulesFor, saveRules } = await import("../lib/rules");
   const { hashPassword } = await import("../lib/secrets");
-  const { runSettlement, syncActivities } = await import("../lib/settle");
+  const { runSettlement } = await import("../lib/settle");
   const { claimSick } = await import("../lib/sick");
   const { addDays, datesBetween, localDate, weekStart, weekdayOf } = await import("../lib/time");
-  const { FakeBank, FakeStrava, at } = await import("../tests/fakes");
+  const { FakeBank, FakePhotoCheck, FakeStrava, at } = await import("../tests/fakes");
 
   const db = await getDb();
   const strava = new FakeStrava();
+  strava.linked = false;
   const bank = new FakeBank();
+  const photos = new FakePhotoCheck();
+  photos.show = (input) => {
+    if (input.kind === "strength") return { durationS: 48 * 60 + Number(input.day.slice(8)), summary: "Traditional strength training, 48 min (made-up demo photo)" };
+    const km = 3.6 + (Number(input.day.slice(8)) % 25) / 10;
+    return { distanceKm: km, summary: `Outdoor run, ${km.toFixed(2)} km (made-up demo photo)` };
+  };
   let clock = new Date();
   bank.now = () => clock;
 
@@ -99,9 +109,7 @@ async function main() {
     if (kind && day === sickDay) {
       await claimSick(db, at(day, "09:00"), day, true);
     } else if (kind && !skipped.has(day)) {
-      if (kind === "run") strava.run(day, 3.6 + ((shot * 37) % 50) / 10, "07:1" + (shot % 10));
-      else if (shot % 3 === 0) strava.lift(day, 48, "18:30");
-      else await saveProof(db, at(day, "19:40"), fakeScreenshot(shot));
+      await saveProof(db, at(day, "19:40"), day, fakeScreenshot(shot), photos);
       shot++;
     }
     // The friend gives the first penalty back three weeks in, and pays for pizza once.
@@ -111,13 +119,10 @@ async function main() {
       bank.receive(1250, friend.friendIban, friend.friendName, "pizza");
     }
     clock = at(addDays(day, 1), "03:30");
-    await runSettlement(db, { strava, bank }, clock);
+    await runSettlement(db, { strava, bank, photos }, clock);
   }
 
-  if (want === "done") strava.run(today, 5.2, "07:42");
-  // Leave the last week of activities in the local copy, as a real sync would.
-  await syncActivities(db, strava, addDays(today, -6), today, realNow);
-  await kvSet(db, "strava_sync", { at: realNow.toISOString(), ok: true, error: null });
+  if (want === "done") await saveProof(db, realNow, today, fakeScreenshot(99), photos);
   await kvSet(db, "last_run", { at: clock.toISOString(), judged: 1, problems: 0 });
   await kvSet(db, "password", hashPassword(PASSWORD));
 
