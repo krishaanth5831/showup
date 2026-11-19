@@ -1,5 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Pact: two linked rings, you (white) and the friend who holds the money (red). -->
   <rect width="64" height="64" rx="14" fill="#18181b"/>
-  <circle cx="32" cy="32" r="15" fill="none" stroke="#fafafa" stroke-width="6"/>
-  <circle cx="32" cy="32" r="5" fill="#ff6166"/>
+  <circle cx="25" cy="32" r="12" fill="none" stroke="#fafafa" stroke-width="5.5"/>
+  <circle cx="39" cy="32" r="12" fill="none" stroke="#ff6166" stroke-width="5.5"/>
+  <!-- A piece of the white ring drawn again on top, so the rings pass over and under each other. -->
+  <path d="M34.83 38.88 A12 12 0 0 1 28.11 43.59" fill="none" stroke="#fafafa" stroke-width="5.5"/>
 </svg>

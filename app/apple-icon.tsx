@@ -3,15 +3,17 @@ import { ImageResponse } from "next/og";
 export const size = { width: 180, height: 180 };
 export const contentType = "image/png";
 
-// Home-screen icon: a ring with a red centre, the same mark as icon.svg.
+// Home-screen icon: the Pact mark from icon.svg (two linked rings, you and your friend).
+// Square corners here, because the phone rounds the icon itself.
 export default function AppleIcon() {
   return new ImageResponse(
     (
-      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "#18181b" }}>
-        <div style={{ width: 100, height: 100, borderRadius: 100, border: "18px solid #fafafa", display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ width: 30, height: 30, borderRadius: 30, background: "#ff6166" }} />
-        </div>
-      </div>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width={180} height={180}>
+        <rect width="64" height="64" fill="#18181b" />
+        <circle cx="25" cy="32" r="12" fill="none" stroke="#fafafa" strokeWidth="5.5" />
+        <circle cx="39" cy="32" r="12" fill="none" stroke="#ff6166" strokeWidth="5.5" />
+        <path d="M34.83 38.88 A12 12 0 0 1 28.11 43.59" fill="none" stroke="#fafafa" strokeWidth="5.5" />
+      </svg>
     ),
     size,
   );
