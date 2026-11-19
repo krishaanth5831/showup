@@ -70,7 +70,9 @@ the demo, so nothing can move money. `DEMO_TODAY=run npm run demo` (or `strength
 6. Train in practice mode for a few days, then switch on real money. It starts the next day.
 
 A key that starts with `sandbox_` connects to bunq's test environment with play money, which
-is a safe way to watch the whole thing work first.
+is a safe way to watch the whole thing work first. Pasting a real key afterwards ends the
+test: test penalties are dropped, the days so far count as practice, and real money stays
+off until you switch it on again. Play money and real money never end up in the same books.
 
 ## Put it online
 
@@ -100,6 +102,9 @@ then only runs while the app is running and you open it (or press "Check now").
 - It cannot stop your friend from sending the money back early. Pick a strict friend.
 - It does not judge what is on a screenshot. Your friend can see every screenshot on their page.
 - There are no sick days. A miss is a miss.
+- It does not move the money on to an investment account. Brokers generally refuse deposits
+  that come from someone else's bank account, so your friend sends the money back to you and
+  the app marks it as returned. Putting it into your investments from there is up to you.
 
 ## Development
 

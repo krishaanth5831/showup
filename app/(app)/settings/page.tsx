@@ -184,6 +184,12 @@ async function Settings({ searchParams }: { searchParams: Promise<Record<string,
               <p className="font-medium">{s.bank.accountLabel}</p>
               {s.bank.env === "sandbox" && <Chip tone="accent">Test money</Chip>}
             </div>
+            {s.bank.env === "sandbox" && (
+              <p className="max-w-[60ch] text-sm leading-relaxed text-muted">
+                This is bunq&apos;s test environment, so no real money moves. Connecting a real key ends the test: test penalties are dropped,
+                the days so far count as practice, and real money stays off until you switch it on again.
+              </p>
+            )}
             <p className="text-sm leading-relaxed text-muted">
               Penalties leave from <span className="num text-ink">{prettyIban(s.bank.accountIban)}</span> ({s.bank.accountName}).{" "}
               {s.bank.lastCheck ? (s.bank.lastCheck.ok ? `Last checked on ${when(s.bank.lastCheck.at)}.` : `Last check failed: ${s.bank.lastCheck.error}`) : ""}

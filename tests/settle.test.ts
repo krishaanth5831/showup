@@ -1,7 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { type Db, openMemoryDb } from "../lib/db";
+import { applyBankSwitch, planBankSwitch } from "../lib/bank-switch";
+import { type Db, openTestDb } from "../lib/db";
 import { DEFAULT_RULES } from "../lib/engine";
-import { kvGet } from "../lib/kv";
+import { kvGet, kvSet } from "../lib/kv";
 import { ProofError, proofTarget, saveProof } from "../lib/proofs";
 import { LOCK_DAYS, RuleError, arm, cancelPending, disarm, ensureRules, ruleState, rulesFor, saveRules } from "../lib/rules";
 import { activitiesOn, penaltyRef, runSettlement, settlementDue } from "../lib/settle";
@@ -20,7 +21,7 @@ let bank: FakeBank;
 let clock: Date;
 
 beforeAll(async () => {
-  db = await openMemoryDb();
+  db = await openTestDb();
 });
 
 beforeEach(async () => {
@@ -554,5 +555,75 @@ describe("clock changes", () => {
     const s = await sessions();
     expect(s.map((x) => x.date)).toEqual(["2027-03-22", "2027-03-23", "2027-03-24", "2027-03-26", "2027-03-27", "2027-03-29"]);
     expect((await session("2027-03-27")).status).toBe("done");
+  });
+});
+
+describe("test money and real money", () => {
+  it("ends a rehearsal when a real key replaces a test key, and nothing from it becomes real", async () => {
+    await kvSet(db, "ledger_env", "sandbox");
+    await armed();
+    await nightly("2026-11-23", "2026-11-24"); // two misses paid with play money
+    expect((await penalties()).map((p) => p.status)).toEqual(["held", "held"]);
+    bank.receive(1000, FRIEND.friendIban, FRIEND.friendName, "showup back");
+
+    // Wednesday 25 Nov, before that day is judged: the real key goes in.
+    const now = at("2026-11-25", "12:00");
+    const plan = await planBankSwitch(db, "2026-11-25", "production");
+    expect(plan.kind).toBe("end-test");
+    await applyBankSwitch(db, now, "production", plan);
+
+    expect(await penalties()).toEqual([]);
+    expect((await sessions()).map((s) => [s.date, s.practice])).toEqual([
+      ["2026-11-23", true],
+      ["2026-11-24", true],
+    ]);
+    expect(await kvGet(db, "ledger_env")).toBe("production");
+    const state = await ruleState(db, "2026-11-25");
+    expect(state.locked).toBe(false);
+    expect(state.pending).toBeNull();
+
+    // Days judged afterwards are practice: no transfer leaves the real account.
+    const real = new FakeBank();
+    real.now = () => clock;
+    clock = at("2026-11-28", "03:30");
+    await runSettlement(db, { strava, bank: real }, clock);
+    expect(await penalties()).toEqual([]);
+    expect(real.sent).toEqual([]);
+    expect((await session("2026-11-25")).practice).toBe(true);
+  });
+
+  it("drops a planned switch-on together with the rehearsal", async () => {
+    await kvSet(db, "ledger_env", "sandbox");
+    await armed(); // planned for Monday, asked on Sunday
+    const plan = await planBankSwitch(db, "2026-11-22", "production");
+    await applyBankSwitch(db, at("2026-11-22", "18:00"), "production", plan);
+    const state = await ruleState(db, "2026-11-22");
+    expect(state.pending).toBeNull();
+    expect((await ruleState(db, "2026-11-23")).locked).toBe(false);
+    expect(state.current.rules.friendIban).toBe(FRIEND.friendIban);
+  });
+
+  it("refuses a test key while real money is on, and for good once real transfers exist", async () => {
+    await kvSet(db, "ledger_env", "production");
+    await armed();
+    expect((await planBankSwitch(db, "2026-11-22", "sandbox")).kind).toBe("refuse"); // switch-on planned
+    await nightly("2026-11-23", "2026-11-23");
+    expect((await planBankSwitch(db, "2026-11-24", "sandbox")).kind).toBe("refuse"); // armed
+
+    await disarm(db, "2026-11-24");
+    const later = addDays("2026-11-24", LOCK_DAYS + 1);
+    expect((await ruleState(db, later)).locked).toBe(false);
+    const plan = await planBankSwitch(db, later, "sandbox");
+    expect(plan.kind).toBe("refuse"); // the real penalty is still on record
+    await expect(applyBankSwitch(db, at(later, "12:00"), "sandbox", plan)).rejects.toThrow(/test money/);
+  });
+
+  it("accepts the first key of either kind, a new key of the same kind, and a test key before any real transfer", async () => {
+    await practice();
+    expect((await planBankSwitch(db, "2026-11-22", "sandbox")).kind).toBe("fine");
+    expect((await planBankSwitch(db, "2026-11-22", "production")).kind).toBe("fine");
+    await applyBankSwitch(db, at("2026-11-22", "12:00"), "production", { kind: "fine" });
+    expect((await planBankSwitch(db, "2026-11-22", "production")).kind).toBe("fine");
+    expect((await planBankSwitch(db, "2026-11-22", "sandbox")).kind).toBe("fine");
   });
 });

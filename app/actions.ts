@@ -1,5 +1,6 @@
 "use server";
 
+import { applyBankSwitch, planBankSwitch } from "@/lib/bank-switch";
 import { refresh } from "next/cache";
 import { redirect } from "next/navigation";
 import { createPassword, login, logout, requireUser } from "@/lib/auth";
@@ -126,12 +127,19 @@ export async function connectBunqAction(_prev: FormState, form: FormData): Promi
     const client = new BunqClient(state);
     const accounts = await client.listAccounts();
     if (accounts.length === 0) return { error: "bunq connected, but no active account with an IBAN was found." };
+    // Test money and real money never share the books: see lib/bank-switch.ts.
+    const now = new Date();
+    const plan = await planBankSwitch(db, localDate(now), state.env);
+    if (plan.kind === "refuse") return { error: plan.why };
+    await applyBankSwitch(db, now, state.env, plan);
     await saveBunq(db, client.useAccount(accounts[0]));
-    await kvDelete(db, "bank_seen_id");
-    await kvDelete(db, "bank_check");
-    await logEvent(db, new Date(), "bank", `bunq connected (${state.env})`);
+    await logEvent(db, now, "bank", `bunq connected (${state.env})`);
     refresh();
-    return { ok: `Connected. Penalties leave from ${accounts[0].label} (${accounts[0].iban}).` };
+    const from = `Penalties leave from ${accounts[0].label} (${accounts[0].iban}).`;
+    if (plan.kind === "end-test") {
+      return { ok: `Connected. The test with play money is over: the days so far count as practice and real money is off until you switch it on. ${from}` };
+    }
+    return { ok: `Connected. ${from}` };
   } catch (e) {
     return fail(e);
   }

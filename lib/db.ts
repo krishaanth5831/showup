@@ -99,6 +99,18 @@ export async function openMemoryDb(): Promise<Db> {
   return db;
 }
 
+/**
+ * The database the tests run on: in-memory by default, or a real Postgres server when
+ * TEST_DATABASE_URL is set. CI runs the suite both ways, so the production driver is covered.
+ */
+export async function openTestDb(): Promise<Db> {
+  const url = process.env.TEST_DATABASE_URL;
+  if (!url) return openMemoryDb();
+  const db = await openPostgres(url);
+  await migrate(db);
+  return db;
+}
+
 async function openLocal(): Promise<Db> {
   if (process.env.VERCEL) {
     throw new Error(
