@@ -6,21 +6,34 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "typecheck": "next typegen && tsc --noEmit",
+    "check:bunq": "node --import tsx scripts/bunq-sandbox.ts",
+    "demo": "node --import tsx scripts/demo.ts && SHOWUP_DATA_DIR=.data-demo next dev -p 3210",
+    "demo:seed": "node --import tsx scripts/demo.ts"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "@phosphor-icons/react": "^2.1.10",
+    "geist": "^1.9.2",
     "next": "16.4.6",
+    "pg": "^8.23.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "undici": "^7.30.2"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.6",
     "tailwindcss": "4.3.3",
-    "typescript": "^5"
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^4.1.12"
   }
 }

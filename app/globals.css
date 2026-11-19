@@ -1,26 +1,91 @@
 @import "tailwindcss";
 
+/*
+  One neutral palette and one accent. The accent (red) only ever means money at stake.
+  "Done" is shown with solid ink, not with a second colour.
+  Shape rule: buttons and chips are pills, panels are 20px, inputs are 12px.
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --bg: #f4f4f5;
+  --surface: #fcfcfc;
+  --ink: #18181b;
+  --muted: #5f5f68;
+  --line: #e2e2e6;
+  --accent: #d32f33;
+  --on-accent: #fffafa;
+  --on-ink: #fafafa;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --bg: #0f0f11;
+    --surface: #18181b;
+    --ink: #f4f4f5;
+    --muted: #a3a3ad;
+    --line: #2a2a2f;
+    --accent: #ff6166;
+    --on-accent: #1c0607;
+    --on-ink: #0f0f11;
   }
 }
 
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-on-ink: var(--on-ink);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: light dark;
+  -webkit-text-size-adjust: 100%;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.num {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Loading placeholder: a slow pulse, switched off for people who prefer no motion. */
+.skeleton {
+  background: var(--line);
+  border-radius: 12px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton {
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .rise {
+    animation: rise 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
 }
