@@ -77,8 +77,7 @@ the demo, so nothing can move money. `DEMO_TODAY=run npm run demo` (or `strength
    - API keys need bunq Pro or Elite.
    - In the bunq app: Profile, Security & Settings, Developers, API keys.
    - Before pasting it anywhere, open the key's menu and switch on "Allow all IP addresses",
-     otherwise bunq refuses a server whose address changes. bunq's docs say a key can't be
-     switched to "all IP addresses" once it has been used from a fixed one.
+     otherwise bunq refuses a server whose address changes.
    - Press "Send a 1 cent test" once, to see that the name and IBAN are accepted.
 5. Send your friend their link (Settings, friend's page).
 6. Train in practice mode for a few days, then switch on real money. It starts the next day.
