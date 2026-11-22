@@ -2,9 +2,42 @@
 
 Show up for your workouts, or pay up.
 
-Showup is a small web app for one person. You pick the days you train. If a session is
-missing when the day is over, the app sends real money from your bank account to a friend,
-and every miss in a row costs more. The friend keeps it for a while and then sends it back.
+Showup is a small web app for one person. You pick the days you train and prove each
+session with a photo of the workout summary, which Claude reads. If a session is missing
+when the day is over, you owe a friend real money, and every miss in a row costs more. By
+default the app tells your friend what to collect from you; bunq can also send it
+automatically. The friend keeps it for a while and then gives most of it back.
+
+It is open source (MIT). Each person runs their own copy: there is no shared service to sign
+up for.
+
+## Status
+
+Showup is new and not in daily use yet. Covered by automated tests: the rules, the nightly
+judging, penalties, sick days, the friend-collects flow, the photo rules (with a stand-in
+for Claude) and the bunq payment logic (against a fake bank and, with `npm run check:bunq`,
+bunq's sandbox). **Not tried for real yet:**
+
+- a notification actually arriving on a real phone, and installing the friend's page on an
+  iPhone Home Screen
+- a real workout screenshot going through the Claude photo check (only drawn test images so far)
+- the photo upload button in a browser with a real key
+- connecting Strava
+- sending money with a real (non-sandbox) bunq account
+- a full deployment on Vercel with a Postgres database
+
+If you try one of these, please open an issue with what happened.
+
+## Features
+
+- Fixed training days with a minimum per session (distance for runs, time for strength)
+- Photo proof checked by Claude, with the pass/fail decision made by the app's own rules
+- Escalating penalties with a per-miss and per-week cap, all adjustable
+- "Friend collects" by default: the friend gets their own installable page and push
+  notifications, no account needed; optional automatic bank transfers through bunq
+- Sick days, a practice mode before real money, and a 7-day delay on rule changes once armed
+- Optional Strava connection so a recorded run counts without a photo
+- Runs on your own computer with no setup (an embedded Postgres), or on Vercel with Postgres
 
 ## How it works
 
@@ -120,11 +153,9 @@ It is set up for Vercel:
 
 Opening the app also runs any check that is overdue, so a missed nightly run is caught up.
 
-On your own computer no setup is needed: `npm run dev` starts the app on
-http://localhost:3000 and the database lives in `./.data`. A phone on the same Wi-Fi can
-open it through the computer's network address, which `npm run dev` prints as "Network".
-The app only works while that command is running, and the nightly check then happens
-when you open the app (or press "Check now").
+Notifications to the friend's phone need the app on HTTPS, which Vercel gives you. Your
+own computer (below) is fine for trying things out, but a friend's phone can't install
+the page or get notifications from it.
 
 ## Safety
 
@@ -149,22 +180,141 @@ when you open the app (or press "Check now").
   that come from someone else's bank account, so your friend sends the money back to you and
   the app marks it as returned. Putting it into your investments from there is up to you.
 
-## Development
+## Run it on your own computer
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org) 20.9 or newer (CI uses 22) and npm
+- Git
+- Nothing else: locally the database is [PGlite](https://pglite.dev) (Postgres compiled to
+  WebAssembly), stored in a folder inside the project. No Docker, no database server.
+- Optional: a Claude API key (for the photo check), a bunq account (for bank transfers),
+  a Strava API app
+
+### Steps
+
+1. Get the code and install the dependencies:
+
+   ```bash
+   git clone https://github.com/krishaanth5831/showup.git
+   cd showup
+   npm install
+   ```
+
+2. Start the app:
+
+   ```bash
+   npm run dev
+   ```
+
+3. Open **http://localhost:3000**. The first visit takes you to `/setup`, where you choose
+   the app's password. The database (`./.data/pg`) and a secret key (`./.data/app-secret`)
+   are created on first use. Both are ignored by git; deleting `.data` starts over.
+
+4. Go to Settings to set your training days, rules, friend and keys (see "Use it for real"
+   above). Until you switch on real money, nothing is charged.
+
+No `.env` file is needed locally. A phone on the same Wi-Fi can open the app through the
+computer's network address, which `npm run dev` prints as "Network". The app only runs
+while that command is running, so the nightly check happens when you open the app (or press
+"Check now" in Settings).
+
+Just want to look around? `npm run demo` (see "Try it without connecting anything") uses its
+own database in `./.data-demo` and never touches your real one.
+
+### Environment variables
+
+All of them are optional on your own computer. On Vercel, `DATABASE_URL`, `APP_SECRET`
+and `CRON_SECRET` are required. Copy `.env.example` to `.env.local` if you want to set any
+locally.
+
+| Variable | Needed | What it does |
+| --- | --- | --- |
+| `DATABASE_URL` | On a server | Postgres connection string. `POSTGRES_URL` is accepted too. Without either, the app uses PGlite in `./.data` (and refuses to start on Vercel). |
+| `APP_SECRET` | On a server | At least 32 random characters (`openssl rand -base64 48`). Encrypts the stored keys and signs the login. Locally one is generated in `./.data/app-secret`. Changing it means entering the keys again. |
+| `CRON_SECRET` | On a server | Random text that Vercel Cron sends with the nightly check, so nobody else can trigger it. |
+| `SHOWUP_TZ` | No | Time zone for all deadlines. Default `Europe/Amsterdam`. |
+| `SHOWUP_DATA_DIR` | No | Where the local database and secret live. Default `./.data` (the demo uses `./.data-demo`). |
+| `PUSH_CONTACT` | No | Contact address sent to push services with each notification. Default `mailto:showup@example.com`. |
+| `HTTPS_PROXY` | No | Send outgoing requests (Claude, bunq, Strava, push) through a proxy. |
+| `TEST_DATABASE_URL` | Tests only | Run `npm test` against a real Postgres server instead of the in-memory one. |
+| `DEMO_TODAY` | Demo only | `run`, `strength`, `done` or `rest`: what today looks like in `npm run demo`. |
+| `ANTHROPIC_API_KEY` | `check:claude` only | The app itself takes the Claude key in Settings, not from the environment. |
+
+The Claude key, bunq key and Strava app details are entered in Settings and stored
+encrypted in the database, never in environment variables or the repository. The push
+notification keys (VAPID) are generated by the app on first use.
+
+### Scripts
 
 ```bash
+npm run dev          # the app on http://localhost:3000
+npm run demo         # seeds made-up history, then the app on http://localhost:3210 (password printed)
+npm run demo:seed    # only (re)seed the demo database
 npm test             # rules, the nightly job, payments and returns, against a real in-memory Postgres
 npm run lint
 npm run typecheck
-npm run build
+npm run build        # production build
+npm start            # serve the production build (after npm run build)
 npm run check:bunq   # the real bank code against bunq's sandbox (play money, needs internet)
 ANTHROPIC_API_KEY=sk-ant-... npm run check:claude -- photo.jpg run   # one real photo check, a few cents
 ```
 
-Built with Next.js, Postgres (PGlite locally) and Tailwind. The rules live in
-`lib/engine.ts` (including `judgePhoto`), photo uploads in `lib/proofs.ts`, the photo check in
-`lib/claude.ts`, the nightly job in `lib/settle.ts`, the bank in `lib/bunq.ts` and Strava in
-`lib/strava.ts`.
+`check:claude` takes `<photo> <run|strength> [YYYY-MM-DD] [earlier.jpg@YYYY-MM-DD ...]`. The
+day defaults to today; earlier photos (newest first, each with the day it proved) are what
+the new one is compared with. It never touches the app's database.
+
+## Tech stack
+
+- [Next.js](https://nextjs.org) 16 (App Router, Cache Components) and React 19, TypeScript
+- Postgres: `pg` on a server, PGlite on your own computer and in tests
+- Tailwind CSS v4, Geist font, Phosphor icons
+- Claude through the official `@anthropic-ai/sdk` (the photo check uses `claude-opus-5-5`)
+- `web-push` for notifications, Zod for validation, Vitest for tests
+- Vercel for hosting and the nightly cron (`vercel.json`)
+
+## Project layout
+
+```
+app/
+  (app)/            the owner's screens: Today (page.tsx), History, Settings
+  f/[token]/        the friend's page and its own installable manifest
+  setup/, login/    first-run password and sign-in
+  api/cron/settle/  the nightly check that Vercel Cron calls
+  api/proof/[id]/   serves an uploaded photo
+  api/strava/       Strava connect and callback
+  actions.ts        server actions for the owner; friend-actions.ts for the friend's page
+  ui/               shared components (forms, upload, countdown, logo, ...)
+lib/
+  engine.ts         the rules: judging days, prices, caps, judgePhoto
+  rules.ts          versioned rules (a change never rewrites history)
+  settle.ts         the nightly job
+  proofs.ts         photo uploads; claude.ts reads them
+  collect.ts        friend-collects flow; push.ts notifications
+  bunq.ts           bank transfers and matching returns; bank-switch.ts sandbox vs real
+  strava.ts         optional Strava connection
+  sick.ts           sick days
+  db.ts, migrations.ts   Postgres / PGlite and the schema
+  secrets.ts, auth.ts    encryption, password and sign-in
+public/sw.js        service worker for notifications
+scripts/            demo seeding, bunq sandbox check, one-off Claude photo check
+tests/              Vitest suites (engine, nightly settle) and fakes
+```
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+- Work happens on the `dev` branch. `main` is protected and only takes pull requests from
+  `dev` (a required check enforces it), so open your pull request against `dev`.
+- Before opening one, run `npm run lint`, `npm run typecheck`, `npm test` and `npm run build`.
+  CI runs the same checks, with the tests twice: once on the in-memory database and once on
+  a real Postgres server.
+- `CLAUDE.md` lists the things that must stay true (whole-cent money, never paying twice,
+  versioned rules, what the friend's page may show). Please keep to them.
+- Never commit keys, IBANs or personal data. Keys belong in the app's Settings, where they
+  are stored encrypted.
 
 ## License
 
-MIT
+[MIT](LICENSE)
