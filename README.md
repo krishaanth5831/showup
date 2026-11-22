@@ -264,6 +264,15 @@ ANTHROPIC_API_KEY=sk-ant-... npm run check:claude -- photo.jpg run   # one real 
 day defaults to today; earlier photos (newest first, each with the day it proved) are what
 the new one is compared with. It never touches the app's database.
 
+### Troubleshooting
+
+- **"APP_SECRET is too short"**: it needs at least 32 characters. `openssl rand -base64 48` makes a good one.
+- **"No database configured" or "APP_SECRET is not set" on Vercel**: add a Postgres database to the project (it sets `DATABASE_URL`) and `APP_SECRET`, then redeploy. On Vercel the app refuses to fall back to the local database.
+- **The nightly check answers "CRON_SECRET is not set"**: add `CRON_SECRET` to the project's environment variables. Until then, opening the app still catches up on overdue days.
+- **The friend's phone can't install the page or turn on notifications**: it needs the deployed app on HTTPS. The local development server is only reachable over plain HTTP.
+- **A photo is refused**: the reason is shown right away. The date has to be visible on the screenshot, and it has to be the training day.
+- **Starting over locally**: stop `npm run dev` and delete the `.data` folder. This deletes your local history and stored keys.
+
 ## Tech stack
 
 - [Next.js](https://nextjs.org) 16 (App Router, Cache Components) and React 19, TypeScript
